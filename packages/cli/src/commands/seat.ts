@@ -506,7 +506,7 @@ identity remains unverified; a version number alone cannot clear it.
   // Thin CLI over the daemon's SeatLifecycleService; refusals print message +
   // guidance + match list exactly as the daemon named them.
   const runLifecycleVerb = async (
-    path: "set-model" | "set-permissions" | "launch" | "continue" | "stop" | "clean",
+    path: "set-model" | "set-permissions" | "launch" | "launch-plan" | "continue" | "stop" | "clean",
     seat: string,
     body: Record<string, unknown>,
     opts: { json?: boolean },
@@ -527,25 +527,26 @@ identity remains unverified; a version number alone cannot clear it.
           ? await client.post<Record<string, unknown>>(route, body, { timeoutMs: 10_000 })
           : await client.post<Record<string, unknown>>(route, body);
     } catch (err) {
-      if ((path !== "launch" && path !== "continue") || !(err instanceof DaemonTimeoutError)) throw err;
+      if ((path !== "launch" && path !== "launch-plan" && path !== "continue") || !(err instanceof DaemonTimeoutError)) throw err;
       const error = {
         ok: false as const,
-        code: `${path}_outcome_unknown`,
+        code: path === "launch-plan" ? "launch_plan_timeout" : `${path}_outcome_unknown`,
         status: "unknown",
-        message: `The CLI timed out waiting for the daemon; the ${path === "continue" ? "continuation" : "launch"} may still be in progress.`,
-        guidance: `Check the outcome before retrying: rig seat status ${seat}`,
+        message: path === "launch-plan" ? "The read-only launch preview timed out; no launch was requested." : `The CLI timed out waiting for the daemon; the ${path === "continue" ? "continuation" : "launch"} may still be in progress.`,
+        guidance: path === "launch-plan" ? "Retry the preview when the daemon responds." : `Check the outcome before retrying: rig seat status ${seat}`,
       };
       if (opts.json) console.log(JSON.stringify(error, null, 2));
       else printSeatError(error, error.message);
       process.exitCode = 1;
       return;
     }
+    if (path === "launch-plan" && res.data["launchable"] !== true) process.exitCode = 1;
     if (opts.json) {
       console.log(JSON.stringify(res.data, null, 2));
       if (res.status >= 400) process.exitCode = res.status >= 500 ? 2 : 1;
       return;
     }
-    if (path === "launch" || path === "continue") {
+    if (path === "launch" || path === "launch-plan" || path === "continue") {
       for (const warning of (res.data["warnings"] as string[] | undefined) ?? []) console.warn(`Warning: ${warning}`);
     }
     if (res.status >= 400) {
@@ -609,7 +610,8 @@ resume/successor launch reads it at call time. Examples:
     .command("launch")
     .argument("<seat>", "Canonical session name or logical seat ref")
     .requiredOption("--fresh", "Explicitly create a blank native occupant; no continuity source is used")
-    .requiredOption("--reason <text>", "Audit reason recorded on the seat.fresh_launched event")
+    .option("--reason <text>", "Audit reason (required when executing, optional with --plan)")
+    .option("--plan", "Preview this fresh launch without changing any seat or starting tmux")
     .option("--stop", "Stop the current live managed occupant before launching fresh")
     .option("--operator <address>", "Operator recorded on the audit event")
     .option("--json", "JSON output for agents")
@@ -617,16 +619,42 @@ resume/successor launch reads it at call time. Examples:
     .addHelpText("after", `
 No resume, fork, rebuild, snapshot, checkpoint, or restore packet is used.
 A live managed seat requires --stop; adopted and unmanaged sessions are refused.
+Sibling seats stay attached and untouched. The runtime adapter composes a new
+command from current settings; launch does not replay a stored wrapper command.
+Preview is a read-only snapshot, not a reservation or a native readiness check.
+Unknown tmux or runtime details produce complete:false and a nonzero exit;
+command templates use redacted placeholders and cannot be executed.
 Examples:
+  rig seat launch dev.impl --fresh --plan --json
   rig seat launch dev-impl@my-rig --fresh --reason "deliberate blank restart"
   rig seat launch dev.impl --fresh --stop --reason "replace managed occupant" --json`)
-    .action(async (seat: string, opts: { fresh: boolean; reason: string; stop?: boolean; operator?: string; json?: boolean }) => {
-      await runLifecycleVerb("launch", seat, {
+    .action(async (seat: string, opts: { fresh: boolean; reason?: string; plan?: boolean; stop?: boolean; operator?: string; json?: boolean }) => {
+      if (!opts.plan && !opts.reason?.trim()) {
+        const error = { ok: false, code: "missing_reason", message: "Execution requires --reason; use --plan for a read-only preview." };
+        if (opts.json) console.log(JSON.stringify(error, null, 2));
+        else console.error(error.message);
+        process.exitCode = 1;
+        return;
+      }
+      await runLifecycleVerb(opts.plan ? "launch-plan" : "launch", seat, {
         fresh: opts.fresh === true,
         reason: opts.reason,
         stop: opts.stop === true,
         operator: opts.operator,
       }, opts, (data) => {
+        if (opts.plan) {
+          console.log(`Fresh launch preview: ${String(data["sessionName"])} (no changes made).`);
+          console.log(`Runtime: ${String(data["runtime"])}; cwd: ${String(data["cwd"])}; model: ${String(data["model"] ?? "none")}; effort: ${String(data["effort"] ?? "none")}.`);
+          console.log(`Complete: ${String(data["complete"])}; launchable: ${data["launchable"] == null ? "unknown" : String(data["launchable"])}; stop required: ${data["stopRequired"] == null ? "unknown" : String(data["stopRequired"])}; would stop: ${data["wouldStop"] == null ? "unknown" : String(data["wouldStop"])}.`);
+          const permission = data["permission"] as { effectiveMode: string; source: string } | null;
+          if (permission) console.log(`Permission selection: ${permission.effectiveMode} (${permission.source}).`);
+          const command = data["command"] as { commandTemplate: string | null; warnings: string[] };
+          console.log(`Command template (not executable): ${command.commandTemplate ?? "unavailable"}`);
+          for (const blocker of data["blockers"] as Array<{ message: string }>) console.log(`Blocked: ${blocker.message}`);
+          for (const warning of command.warnings) console.warn(`Warning: ${warning}`);
+          for (const sibling of data["siblings"] as Array<{ logicalId: string }>) console.log(`Sibling ${sibling.logicalId}: unchanged.`);
+          return;
+        }
         const s = data["seat"] as { logicalId?: string; rigName?: string } | undefined;
         const superseded = data["supersededSessionIds"] as string[] | undefined;
         console.log(`Fresh occupant ready: ${s?.logicalId}@${s?.rigName} (${String(data["sessionName"])}).`);

@@ -236,6 +236,24 @@ post-launch files. If it needs them, first look at what that occupant has done; 
 `rig seat launch <seat> --fresh --reason <text>` starts a blank conversation for the seat. If the occupant is still
 live, the command refuses with `session_live` unless you also pass `--stop`, which replaces that occupant deliberately.
 
+**Preview before replacing a seat.** `rig seat launch <seat> --fresh --plan` inspects the selected
+seat without starting tmux, stopping or launching a process, projecting startup files, or changing
+lifecycle/queue records. Add `--json` for structured output. `--fresh` is still required;
+`--reason` is optional for the preview and required when executing. Pass `--stop` to preview the
+intended replacement of a live managed occupant. Adopted and unmanaged occupants remain blocked.
+
+The plan identifies the target, cwd, model/effort, permission selection, stop requirements, startup
+counts, and each sibling seat's unchanged effect. Siblings stay attached and untouched. Launch
+composes a new command through the runtime adapter using current settings; it does not replay a
+stored wrapper command. Command templates are non-executable shell comments with placeholders:
+startup text, credentials, environment values, and generated identities are not included.
+
+A preview is a snapshot, not a reservation or a native-readiness check. Unreadable tmux or unresolved
+runtime details produce `complete: false` and `launchable: null` (unknown), unless a known blocker
+already proves `launchable: false`. Only `launchable: true` exits successfully; blocked or incomplete
+plans exit nonzero. Execution always resolves and checks the current state again. An older daemon
+without the preview endpoint refuses the request; the CLI never falls back to executing a launch.
+
 ### The `applies_on` Field
 
 Each startup file and action specifies when it applies:
