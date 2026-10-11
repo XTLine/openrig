@@ -579,8 +579,10 @@ export class SeatLifecycleService {
     };
     try {
       const store = new NativePermissionStore(this.db);
-      const selection = store.resolve(node.id, adapter.runtime);
-      permission = { effectiveMode: selection.effectiveMode, source: selection.source };
+      if (adapter.runtime === "claude-code" || adapter.runtime === "codex") {
+        const selection = store.resolve(node.id, adapter.runtime);
+        permission = { effectiveMode: selection.effectiveMode, source: selection.source };
+      }
       const launchPosture = this.rigRepo.getNodePolicyProvenance(node.id)?.launchPosture
         ?? this.rigRepo.getRigPolicyProvenance(seat.rigId)?.launchPosture ?? "floor";
       const binding = store.apply({

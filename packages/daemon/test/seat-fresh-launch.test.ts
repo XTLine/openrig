@@ -455,6 +455,20 @@ describe("SeatLifecycleService.launchFresh", () => {
     expect(tmux.killSession).not.toHaveBeenCalled();
   });
 
+  it.each(["pi", "omp", "terminal", "stub"])("does not invent a native permission selection for %s", async runtime => {
+    const seat = seedSeat({ clean: true });
+    db.prepare("UPDATE nodes SET runtime = ? WHERE id = ?").run(runtime, seat.node.id);
+    db.prepare("UPDATE node_startup_context SET runtime = ? WHERE node_id = ?").run(runtime, seat.node.id);
+    const previewLaunch = vi.fn(async () => ({ status: "available" as const, executable: false as const, commandTemplate: null, warnings: [] }));
+    const other = new SeatLifecycleService({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: tmux,
+      nodeLauncher: {} as NodeLauncher, startupOrchestrator: {} as StartupOrchestrator,
+      runtimeAdapters: { [runtime]: { ...adapter, runtime, previewLaunch } } });
+    const result = await other.planFresh({ seatRef: seat.sessionName, fresh: true });
+    expect(result).toMatchObject({ ok: true, permission: null, launchable: true });
+    expect(previewLaunch).toHaveBeenCalledWith(expect.objectContaining({ launchPosture: "floor" }), { name: seat.sessionName });
+    expect(tmux.createSession).not.toHaveBeenCalled();
+  });
+
   it("requires explicit fresh and a valid persisted startup context before mutation", async () => {
     const seat = seedSeat({ clean: true, withContext: false });
     const notExplicit = await service.launchFresh({ seatRef: "dev.impl", fresh: false, reason: "x" });
