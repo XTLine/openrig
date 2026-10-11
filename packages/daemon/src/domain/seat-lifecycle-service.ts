@@ -435,7 +435,12 @@ export class SeatLifecycleService {
     return { ...result, message: result.ok ? "Configured context delivered to the existing fresh conversation." : result.errors.join("; ") };
   }
 
-  /** Shared read-only configuration validation; execution resolves again under its lifecycle lock. */
+  /**
+   * Resolve a seat snapshot into current launch settings and persisted startup context.
+   * Return a refusal for stale seats, unavailable services, or runtime/context mismatch.
+   * Reads only: callers receive no reservation or launch guarantee. Execution repeats
+   * this resolution under its lifecycle lock rather than trusting an earlier plan.
+   */
   private resolveFreshLaunch(resolved: ResolvedSeat, seatRef: string) {
     const seat = this.describe(resolved);
     const rig = this.rigRepo.getRig(seat.rigId);
@@ -470,7 +475,12 @@ export class SeatLifecycleService {
     return { ok: true as const, resolved, seat, rig, node, adapter, startup: startup.context, canonicalSessionName, nodeLauncher: this.nodeLauncher, startupOrchestrator: this.startupOrchestrator };
   }
 
-  /** Ownership and pane identity are checked without stopping or repairing anything. */
+  /**
+   * Validate an observed canonical collision against current managed rows and binding.
+   * `stop` authorizes only this matching occupant; it cannot authorize adopted or
+   * mismatched sessions. Return its session row or a refusal, including unknown pane
+   * observations, without stopping, repairing, or starting a tmux server.
+   */
   private async validateFreshCollision(resolved: ResolvedSeat, canonicalSessionName: string, stop: boolean): Promise<LatestSessionRow | SeatRefusal> {
     const currentSession = this.latestSession(resolved.nodeId);
     const currentBinding = this.sessionRegistry.getBindingForNode(resolved.nodeId);
@@ -512,7 +522,12 @@ export class SeatLifecycleService {
     return currentSession!;
   }
 
-  /** Check every historical row/binding that clean would touch before stopping anything. */
+  /**
+   * Check historical rows/bindings that clean would touch, excluding the canonical name.
+   * Read-only tmux probes reject adopted, live, or unreadable historical occupants
+   * before any stop. Null means no historical blocker was observed; the caller must
+   * still validate the canonical occupant and recheck absence before launching.
+   */
   private async validateFreshHistory(nodeId: string, canonicalSessionName: string): Promise<SeatRefusal | null> {
     const rows = this.nonTerminalSessions(nodeId);
     if (rows.some(row => row.origin === "claimed")) {
@@ -529,7 +544,15 @@ export class SeatLifecycleService {
     return null;
   }
 
-  /** Read-only snapshot. No lifecycle lock, repair, projection or native launch is entered. */
+  /**
+   * Snapshot one seat's proposed fresh launch; `fresh` is mandatory and `stop` is intent.
+   * No lifecycle lock, repair, material projection, native launch or persistent write
+   * is entered. Siblings are listed as unchanged; no seat is reserved by the result.
+   * Known blockers set launchable=false; otherwise incomplete observations yield null.
+   * Unreadable tmux and unresolved adapter details remain incomplete, never readiness.
+   * Errors are reduced to safe codes and commands to inert, redacted templates;
+   * startup text, credentials and process output are not included in the response.
+   */
   async planFresh(input: { seatRef: string; fresh: boolean; stop?: boolean }) {
     const refusal = (error: SeatRefusal) => ({
       ...error, planOnly: true as const, complete: error.code !== "tmux_probe_failed", launchable: false as const,
@@ -614,7 +637,13 @@ export class SeatLifecycleService {
     };
   }
 
-  /** Deliberately replace exactly one managed seat with a blank native occupant. */
+  /**
+   * Execute a fresh replacement of exactly one seat, requiring fresh intent and reason.
+   * Resolve configuration again under the lifecycle lock, reject unsafe historical or
+   * canonical occupants, and require positive absence before creating a new occupant.
+   * Unlike planFresh this mutates lifecycle/startup state; an earlier preview grants
+   * no authority to skip validation. Sibling seats are never included in the operation.
+   */
   async launchFresh(input: {
     seatRef: string;
     fresh: boolean;

@@ -233,6 +233,13 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     return { delivered, failed, ...(warnings.length ? { warnings } : {}) };
   }
 
+  /**
+   * Describe a fresh Claude command from the effective binding without preparing a launch.
+   * Model, effort, identity, settings and environment values become placeholders;
+   * the shared builders return only a shell-comment template, never executable input.
+   * Managed executable/permission capability selection remains partial because its
+   * native probes are deliberately skipped. Availability does not promise readiness.
+   */
   async previewLaunch(binding: NodeBinding, _opts: { name: string }): Promise<RuntimeLaunchPreview> {
     const managed = binding.permissionMode !== undefined;
     const warnings: string[] = [];
@@ -1193,7 +1200,12 @@ export function readClaudeSelfReportEvidence(input: {
   }
 }
 
-/** Shared fresh command shape; callers own preparation and transport. */
+/**
+ * Compose the classic fresh command without preparation, probes or transport.
+ * Prefix/posture fragments and identity tokens must be prepared by the caller;
+ * model/effort values are shell-quoted here. Preview callers supply placeholders
+ * and must wrap the returned command in an inert shell comment before exposing it.
+ */
 function buildClaudeFreshCommand(input: {
   rendererPrefix: string; posture: string; model?: string; effort?: string; sessionId: string; name: string;
 }): string {
@@ -1202,7 +1214,12 @@ function buildClaudeFreshCommand(input: {
   return `${input.rendererPrefix}claude ${input.posture}${modelArg}${effortArg} --session-id ${input.sessionId} --name ${input.name}`;
 }
 
-/** The managed wrapper owns executable/environment selection; these are fresh harness arguments. */
+/**
+ * Compose unquoted fresh harness argv shared by managed execution and preview.
+ * The caller supplies effective permission/operational options and identity fields;
+ * the managed wrapper owns executable/environment selection and quoting/transport.
+ * This pure builder does not validate capabilities or generate a session identity.
+ */
 function buildClaudeFreshArgs(input: {
   permissionMode: string; operational: string[]; model?: string; effort?: string; sessionId: string; name: string;
 }): string[] {

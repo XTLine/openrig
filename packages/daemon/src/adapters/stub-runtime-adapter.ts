@@ -155,6 +155,12 @@ export class StubRuntimeAdapter implements RuntimeAdapter {
     return { delivered, failed, ...(warnings.length ? { warnings } : {}) };
   }
 
+  /**
+   * Describe the configured stub mode without recording or starting an occupant.
+   * Hermetic mode returns no command; runner mode uses execution's command builder
+   * with placeholder paths/identities and the binding's effective launch posture.
+   * Neither mode checks runner availability or readiness.
+   */
   async previewLaunch(binding: NodeBinding, _opts: { name: string }): Promise<RuntimeLaunchPreview> {
     if (!this.runnerEntryPath) return { status: "available", executable: false, commandTemplate: null,
       warnings: ["Hermetic stub uses an in-memory launch record; no runner command is launched."] };

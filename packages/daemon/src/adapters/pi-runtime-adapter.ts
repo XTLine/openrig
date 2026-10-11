@@ -200,6 +200,12 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
     return { delivered, failed, ...(warnings.length ? { warnings } : {}) };
   }
 
+  /**
+   * Describe the Pi/OMP runner command from the binding's model and launch posture.
+   * Reuse the execution builder with redacted paths, identities and model values;
+   * do not create runner directories/sidecars or inspect credentials or readiness.
+   * An available template describes command structure, not native-client availability.
+   */
   async previewLaunch(binding: NodeBinding, _opts: { name: string }): Promise<RuntimeLaunchPreview> {
     const trust = this.runtime === "omp"
       ? (yoloEnabled(process.env, binding.launchPosture) ? "approve" : "no-approve")

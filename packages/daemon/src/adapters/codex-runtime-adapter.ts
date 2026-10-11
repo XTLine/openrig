@@ -339,6 +339,13 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     return { delivered, failed, ...(warnings.length ? { warnings } : {}) };
   }
 
+  /**
+   * Describe Codex's fresh command using binding settings and the target session name.
+   * The name selects the queue-option shape but is never emitted in the template.
+   * No git, profile, network, workspace or native-capability probe/preparation runs;
+   * their unresolved options remain placeholders, so this result is always partial.
+   * The shell-comment template shares execution's builder and contains no env values.
+   */
   async previewLaunch(binding: NodeBinding, opts: { name: string }): Promise<RuntimeLaunchPreview> {
     const profile = binding.codexConfigProfile?.trim();
     const posture = codexPostureArg(profile ? ` -p ${shellQuote("<profile>")}` : "", process.env, binding.launchPosture);
@@ -1569,7 +1576,12 @@ function isSkippableCodexUpdatePrompt(paneContent: string): boolean {
     && /^\s*[›>]?\s*3\. Skip until next version\s*$/m.test(paneContent);
 }
 
-/** Shared fresh command shape; no probes, filesystem changes, or transport. */
+/**
+ * Compose Codex's fresh command from caller-resolved option fragments and cwd.
+ * Only cwd is quoted here; option fragments must already be safely formatted.
+ * This pure builder does no probes, filesystem changes or transport. Preview uses
+ * placeholder fragments and makes the result inert before returning it to callers.
+ */
 function buildCodexFreshCommand(input: {
   daemonArg: string; postureArg: string; networkArg: string; cwd: string;
   gitDirArg: string; queueStateDirArg: string; modelArg: string; effortArg: string;
