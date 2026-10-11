@@ -467,7 +467,7 @@ export class SeatLifecycleService {
 
     const canonicalSessionName = deriveCanonicalFromEntry(resolved.entry)
       ?? deriveSessionName(seat.rigName, seat.logicalId);
-    return { ok: true as const, resolved, seat, node, adapter, startup: startup.context, canonicalSessionName, nodeLauncher: this.nodeLauncher, startupOrchestrator: this.startupOrchestrator };
+    return { ok: true as const, resolved, seat, rig, node, adapter, startup: startup.context, canonicalSessionName, nodeLauncher: this.nodeLauncher, startupOrchestrator: this.startupOrchestrator };
   }
 
   /** Ownership and pane identity are checked without stopping or repairing anything. */
@@ -527,6 +527,87 @@ export class SeatLifecycleService {
       if (probe.state === "present") return { ok: false, code: "session_live", message: "A historical occupant is still live; fresh launch refuses to change this seat." };
     }
     return null;
+  }
+
+  /** Read-only snapshot. No lifecycle lock, repair, projection or native launch is entered. */
+  async planFresh(input: { seatRef: string; fresh: boolean; stop?: boolean }) {
+    const refusal = (error: SeatRefusal) => ({
+      ...error, planOnly: true as const, complete: error.code !== "tmux_probe_failed", launchable: false as const,
+      // Parser/probe errors can embed persisted startup content or process output.
+      message: `Fresh launch preview refused: ${error.code}.`,
+    });
+    if (!input.fresh) return refusal({ ok: false, code: "fresh_required", message: "--plan requires --fresh." });
+    const resolved = this.resolveSeat(input.seatRef);
+    if ("code" in resolved) return refusal(resolved);
+    const prepared = this.resolveFreshLaunch(resolved, input.seatRef);
+    if ("code" in prepared) return refusal(prepared);
+    const { seat, rig, node, adapter, startup, canonicalSessionName } = prepared;
+    const blockers: Array<{ code: string; message: string }> = [];
+    const warnings = ["Snapshot only; execution resolves and validates again. Native readiness is not checked."];
+    let complete = true;
+    const guard = this.tmuxAdapter.deliveryGuard?.preference(node.id);
+    if (guard?.effective || guard?.desired) blockers.push({ code: "typing_guard_enabled", message: "Typing protection blocks lifecycle operations for this seat." });
+    const record = (error: SeatRefusal) => {
+      if (error.code === "tmux_probe_failed") {
+        complete = false;
+        warnings.push("tmux state is unknown; no server was started and no occupant was changed.");
+      } else blockers.push({ code: error.code, message: `Fresh launch would be refused: ${error.code}.` });
+    };
+    const history = await this.validateFreshHistory(node.id, canonicalSessionName);
+    if (history) record(history);
+    const probe = await this.probeLiveness(canonicalSessionName, "preview does not repair tmux");
+    const currentOccupant = "code" in probe ? "unknown" : probe.state;
+    let stopRequired: boolean | null = currentOccupant === "absent" ? false : null;
+    let owned = false;
+    if ("code" in probe) record(probe);
+    else if (probe.state === "present") {
+      // Check ownership even without --stop; presence alone is not permission to stop.
+      const collision = await this.validateFreshCollision(resolved, canonicalSessionName, true);
+      if ("code" in collision) record(collision);
+      else {
+        owned = true;
+        stopRequired = true;
+        if (!input.stop) blockers.push({ code: "session_live", message: "A live managed occupant requires --stop." });
+      }
+    }
+    let permission: { effectiveMode: string; source: string } | null = null;
+    let command: import("./runtime-adapter.js").RuntimeLaunchPreview = {
+      status: "unknown", executable: false, commandTemplate: null,
+      warnings: ["This runtime does not expose a read-only command preview."],
+    };
+    try {
+      const store = new NativePermissionStore(this.db);
+      const selection = store.resolve(node.id, adapter.runtime);
+      permission = { effectiveMode: selection.effectiveMode, source: selection.source };
+      const launchPosture = this.rigRepo.getNodePolicyProvenance(node.id)?.launchPosture
+        ?? this.rigRepo.getRigPolicyProvenance(seat.rigId)?.launchPosture ?? "floor";
+      const binding = store.apply({
+        id: "<new-binding>", nodeId: node.id, tmuxSession: canonicalSessionName,
+        tmuxWindow: null, tmuxPane: null, cmuxWorkspace: null, cmuxSurface: null, updatedAt: "",
+        cwd: node.cwd ?? ".", model: node.model ?? undefined, effort: node.effort ?? undefined,
+        codexConfigProfile: node.codexConfigProfile ?? undefined, launchPosture,
+        nonInterruptive: this.rigRepo.getRigNonInterruptive(seat.rigId),
+      }, adapter.runtime);
+      if (adapter.previewLaunch) command = await adapter.previewLaunch(binding, { name: canonicalSessionName });
+    } catch {
+      complete = false;
+      warnings.push("Permission or runtime command details could not be resolved without launching.");
+    }
+    if (command.status !== "available") complete = false;
+    const launchable = blockers.length > 0 ? false : complete ? true : null;
+    const siblings = rig.nodes.filter(n => n.id !== node.id).map(n => ({
+      logicalId: n.logicalId, sessionName: n.binding?.tmuxSession ?? null, effect: "unchanged" as const,
+    }));
+    return {
+      ok: true as const, planOnly: true as const, complete, launchable, seat,
+      sessionName: canonicalSessionName, runtime: node.runtime, cwd: node.cwd ?? ".",
+      model: node.model, effort: node.effort ?? null, permission, currentOccupant,
+      stopRequired, wouldStop: blockers.length > 0 ? false : owned && input.stop === true ? true : stopRequired === null ? null : false,
+      command, blockers, warnings, siblings,
+      startup: { policyHash: startup.hash, projectionCount: startup.plan.entries.length,
+        fileCount: startup.resolvedStartupFiles.filter(f => f.appliesOn.includes("fresh_start")).length,
+        actionCount: startup.startupActions.filter(a => a.appliesOn.includes("fresh_start")).length },
+    };
   }
 
   /** Deliberately replace exactly one managed seat with a blank native occupant. */

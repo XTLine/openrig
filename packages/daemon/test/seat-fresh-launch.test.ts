@@ -307,6 +307,43 @@ describe("SeatLifecycleService.launchFresh", () => {
     return { rig, node, session, sessionName };
   }
 
+  it.each([false, true])("previews fresh launch without changing target, siblings or startup state (live=%s)", async live => {
+    const seat = seedSeat({ clean: !live });
+    const sibling = rigRepo.addNode(seat.rig.id, "dev.qa", { runtime: "claude-code", cwd: "/sibling" });
+    const siblingSession = sessionRegistry.registerSession(sibling.id, "dev-qa@fresh-rig");
+    sessionRegistry.updateBinding(sibling.id, { tmuxSession: siblingSession.sessionName, tmuxPane: "%qa" });
+    alive.add(siblingSession.sessionName);
+    adapter.previewLaunch = vi.fn(async () => ({ status: "available", executable: false, commandTemplate: "# Preview only: <runtime>", warnings: [] }));
+    for (const name of ["project", "deliverStartup", "launchHarness", "checkReady"] as const) vi.spyOn(adapter, name);
+    const before = db.serialize();
+    const result = await service.planFresh({ seatRef: seat.sessionName, fresh: true, stop: true });
+    expect(result).toMatchObject({ ok: true, planOnly: true, complete: true, launchable: true,
+      currentOccupant: live ? "present" : "absent", wouldStop: live, stopRequired: live,
+      siblings: [{ logicalId: "dev.qa", sessionName: siblingSession.sessionName, effect: "unchanged" }] });
+    expect(db.serialize()).toEqual(before);
+    for (const name of ["createSession", "killSession", "startServer", "sendText", "sendKeys", "setSessionOption"] as const) expect(tmux[name]).not.toHaveBeenCalled();
+    for (const name of ["project", "deliverStartup", "launchHarness", "checkReady"] as const) expect(adapter[name]).not.toHaveBeenCalled();
+    expect(alive.has(siblingSession.sessionName)).toBe(true);
+    expect(invalidations).toEqual([]);
+    expect(activitySwaps).toEqual([]);
+  });
+
+  it("returns an incomplete redacted plan when tmux cannot be read, without repairing it", async () => {
+    const seat = seedSeat();
+    await service.stopSeat({ seatRef: seat.sessionName, reason: "fixture stop" });
+    vi.clearAllMocks();
+    vi.mocked(tmux.probeSession).mockRejectedValue(new Error("secret-provider-token"));
+    const before = db.serialize();
+    const result = await service.planFresh({ seatRef: seat.sessionName, fresh: true });
+    expect(result).toMatchObject({ ok: true, planOnly: true, complete: false, launchable: null,
+      currentOccupant: "unknown", stopRequired: null, wouldStop: null });
+    expect(JSON.stringify(result)).not.toContain("secret-provider-token");
+    expect(db.serialize()).toEqual(before);
+    expect(tmux.startServer).not.toHaveBeenCalled();
+    expect(tmux.createSession).not.toHaveBeenCalled();
+    expect(tmux.killSession).not.toHaveBeenCalled();
+  });
+
   it("requires explicit fresh and a valid persisted startup context before mutation", async () => {
     const seat = seedSeat({ clean: true, withContext: false });
     const notExplicit = await service.launchFresh({ seatRef: "dev.impl", fresh: false, reason: "x" });
@@ -360,11 +397,14 @@ describe("SeatLifecycleService.launchFresh", () => {
   });
 
   it("checks historical occupants before stopping the current managed seat", async () => {
-    const seat = seedSeat();
+    const seat = seedSeat({ clean: true });
     const historical = sessionRegistry.registerSession(seat.node.id, "old-impl@fresh-rig");
     sessionRegistry.updateStatus(historical.id, "running");
-    // Keep the canonical row newest so the live target otherwise passes ownership.
-    db.prepare("UPDATE sessions SET created_at = '2000-01-01' WHERE id = ?").run(historical.id);
+    const current = sessionRegistry.registerSession(seat.node.id, seat.sessionName);
+    sessionRegistry.updateStatus(current.id, "running");
+    sessionRegistry.updateBinding(seat.node.id, { tmuxSession: seat.sessionName, tmuxPane: "%old" });
+    alive.add(seat.sessionName);
+    livePanes.set(seat.sessionName, "%old");
     alive.add(historical.sessionName);
     const before = db.serialize();
     const result = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, stop: true, reason: "history gate" });
