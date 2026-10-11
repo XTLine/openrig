@@ -435,6 +435,41 @@ export class SeatLifecycleService {
     return { ...result, message: result.ok ? "Configured context delivered to the existing fresh conversation." : result.errors.join("; ") };
   }
 
+  /** Shared read-only configuration validation; execution resolves again under its lifecycle lock. */
+  private resolveFreshLaunch(resolved: ResolvedSeat, seatRef: string) {
+    const seat = this.describe(resolved);
+    const rig = this.rigRepo.getRig(seat.rigId);
+    const node = rig?.nodes.find((candidate) => candidate.id === seat.nodeId);
+    if (!rig || !node) {
+      return { ok: false as const, code: "seat_not_found" as const, message: `Seat "${seatRef}" no longer exists.`, guidance: SEAT_LOOKUP_GUIDANCE };
+    }
+    if (!this.nodeLauncher || !this.startupOrchestrator) {
+      return { ok: false as const, code: "launch_unavailable" as const, message: "Fresh-launch services are unavailable in this daemon." };
+    }
+
+    const startup = this.readStartupContext(node.id, node.cwd ?? ".");
+    if (!startup.ok) return startup.refusal;
+    if (!node.runtime || startup.context.runtime !== node.runtime) {
+      return {
+        ok: false as const,
+        code: "startup_context_runtime_mismatch" as const,
+        message: `Persisted startup context runtime '${startup.context.runtime}' does not match current node runtime '${node.runtime ?? "missing"}'.`,
+      };
+    }
+    const adapter = this.runtimeAdapters[node.runtime];
+    if (!adapter) {
+      return {
+        ok: false as const,
+        code: "runtime_adapter_missing" as const,
+        message: `No runtime adapter is available for '${node.runtime}'.`,
+      };
+    }
+
+    const canonicalSessionName = deriveCanonicalFromEntry(resolved.entry)
+      ?? deriveSessionName(seat.rigName, seat.logicalId);
+    return { ok: true as const, resolved, seat, node, adapter, startup: startup.context, canonicalSessionName, nodeLauncher: this.nodeLauncher, startupOrchestrator: this.startupOrchestrator };
+  }
+
   /** Deliberately replace exactly one managed seat with a blank native occupant. */
   async launchFresh(input: {
     seatRef: string;
@@ -458,36 +493,9 @@ export class SeatLifecycleService {
     if (guard && !guard.ownsLifecycle(resolved.nodeId)) {
       return guard.lifecycle([resolved.nodeId], () => this.launchFresh(input));
     }
-    const seat = this.describe(resolved);
-    const rig = this.rigRepo.getRig(seat.rigId);
-    const node = rig?.nodes.find((candidate) => candidate.id === seat.nodeId);
-    if (!rig || !node) {
-      return { ok: false, code: "seat_not_found", message: `Seat "${input.seatRef}" no longer exists.`, guidance: SEAT_LOOKUP_GUIDANCE };
-    }
-    if (!this.nodeLauncher || !this.startupOrchestrator) {
-      return { ok: false, code: "launch_unavailable", message: "Fresh-launch services are unavailable in this daemon." };
-    }
-
-    const startup = this.readStartupContext(node.id, node.cwd ?? ".");
-    if (!startup.ok) return startup.refusal;
-    if (!node.runtime || startup.context.runtime !== node.runtime) {
-      return {
-        ok: false,
-        code: "startup_context_runtime_mismatch",
-        message: `Persisted startup context runtime '${startup.context.runtime}' does not match current node runtime '${node.runtime ?? "missing"}'.`,
-      };
-    }
-    const adapter = this.runtimeAdapters[node.runtime];
-    if (!adapter) {
-      return {
-        ok: false,
-        code: "runtime_adapter_missing",
-        message: `No runtime adapter is available for '${node.runtime}'.`,
-      };
-    }
-
-    const canonicalSessionName = deriveCanonicalFromEntry(resolved.entry)
-      ?? deriveSessionName(seat.rigName, seat.logicalId);
+    const prepared = this.resolveFreshLaunch(resolved, input.seatRef);
+    if ("code" in prepared) return prepared;
+    const { seat, node, adapter, startup, canonicalSessionName, nodeLauncher, startupOrchestrator } = prepared;
     const retiringRows = this.nonTerminalSessions(node.id);
     if (retiringRows.some((row) => row.origin === "claimed")) {
       return {
@@ -627,7 +635,7 @@ export class SeatLifecycleService {
       ...(retiringGeneration ? { retiringGeneration } : {}),
     });
 
-    const launch = await this.nodeLauncher.launchNode(seat.rigId, seat.logicalId, {
+    const launch = await nodeLauncher.launchNode(seat.rigId, seat.logicalId, {
       sessionName: canonicalSessionName,
       cwd: node.cwd ?? undefined,
       occupantKind: "fresh",
@@ -646,7 +654,7 @@ export class SeatLifecycleService {
         supersededSessionIds,
         retiringGeneration,
         newGeneration: null,
-        startupPolicyHash: startup.context.hash,
+        startupPolicyHash: startup.hash,
         model: node.model,
         effort: node.effort ?? null,
         reason: input.reason,
@@ -662,7 +670,7 @@ export class SeatLifecycleService {
     const launchPosture = this.rigRepo.getNodePolicyProvenance(node.id)?.launchPosture
       ?? this.rigRepo.getRigPolicyProvenance(seat.rigId)?.launchPosture
       ?? "floor";
-    const startupResult = await this.startupOrchestrator.startNode({
+    const startupResult = await startupOrchestrator.startNode({
       rigId: seat.rigId,
       nodeId: node.id,
       sessionId: launch.session.id,
@@ -675,9 +683,9 @@ export class SeatLifecycleService {
         launchPosture,
       },
       adapter,
-      plan: startup.context.plan,
-      resolvedStartupFiles: startup.context.resolvedStartupFiles,
-      startupActions: startup.context.startupActions,
+      plan: startup.plan,
+      resolvedStartupFiles: startup.resolvedStartupFiles,
+      startupActions: startup.startupActions,
       isRestore: false,
       includeDurableObligations: true,
       sessionName: canonicalSessionName,
@@ -691,7 +699,7 @@ export class SeatLifecycleService {
         supersededSessionIds,
         retiringGeneration,
         newGeneration: generation,
-        startupPolicyHash: startup.context.hash,
+        startupPolicyHash: startup.hash,
         model: node.model,
         effort: node.effort ?? null,
         reason: input.reason,
@@ -757,7 +765,7 @@ export class SeatLifecycleService {
         ...(nativeSessionId ? {} : { nativeSessionIdReason: "scrape_miss" }),
         model: node.model,
         effort: node.effort ?? null,
-        startupPolicyHash: startup.context.hash,
+        startupPolicyHash: startup.hash,
         reason: input.reason.trim(),
         operator: input.operator ?? null,
         status: attentionRequired ? "attention_required" : "ready",
@@ -790,7 +798,7 @@ export class SeatLifecycleService {
       generation,
       model: node.model,
       effort: node.effort ?? undefined,
-      startupPolicyHash: startup.context.hash,
+      startupPolicyHash: startup.hash,
       supersededSessionIds,
       warnings: startupResult.warnings,
     };
