@@ -359,6 +359,21 @@ describe("SeatLifecycleService.launchFresh", () => {
     expect(alive.has(adoptedName)).toBe(true);
   });
 
+  it("checks historical occupants before stopping the current managed seat", async () => {
+    const seat = seedSeat();
+    const historical = sessionRegistry.registerSession(seat.node.id, "old-impl@fresh-rig");
+    sessionRegistry.updateStatus(historical.id, "running");
+    // Keep the canonical row newest so the live target otherwise passes ownership.
+    db.prepare("UPDATE sessions SET created_at = '2000-01-01' WHERE id = ?").run(historical.id);
+    alive.add(historical.sessionName);
+    const before = db.serialize();
+    const result = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, stop: true, reason: "history gate" });
+    expect(result).toMatchObject({ ok: false, code: "session_live" });
+    expect(killed).toEqual([]);
+    expect(db.serialize()).toEqual(before);
+    expect(tmux.startServer).not.toHaveBeenCalled();
+  });
+
   it("refuses an unmanaged canonical collision even when the database seat is clean", async () => {
     const seat = seedSeat({ clean: true });
     alive.add(seat.sessionName);

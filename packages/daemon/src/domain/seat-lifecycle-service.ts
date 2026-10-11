@@ -470,6 +470,65 @@ export class SeatLifecycleService {
     return { ok: true as const, resolved, seat, node, adapter, startup: startup.context, canonicalSessionName, nodeLauncher: this.nodeLauncher, startupOrchestrator: this.startupOrchestrator };
   }
 
+  /** Ownership and pane identity are checked without stopping or repairing anything. */
+  private async validateFreshCollision(resolved: ResolvedSeat, canonicalSessionName: string, stop: boolean): Promise<LatestSessionRow | SeatRefusal> {
+    const currentSession = this.latestSession(resolved.nodeId);
+    const currentBinding = this.sessionRegistry.getBindingForNode(resolved.nodeId);
+    const currentManaged = currentSession !== null
+      && !TERMINAL_SESSION_STATUSES.has(currentSession.status)
+      && currentSession.origin !== "claimed"
+      && currentSession.session_name === canonicalSessionName
+      && currentBinding?.tmuxSession === canonicalSessionName;
+    if (!currentManaged) {
+      return {
+        ok: false,
+        code: "unmanaged_session_collision",
+        message: `Canonical tmux session "${canonicalSessionName}" exists but is not owned by this seat's current managed rows; refusing to overwrite it.`,
+      };
+    }
+    if (!stop) {
+      return {
+        ok: false,
+        code: "session_live",
+        message: `Seat "${canonicalSessionName}" is live; fresh launch refuses without --stop.`,
+        guidance: "Re-run with --stop to end exactly this managed occupant, or use rig handover to carry context.",
+      };
+    }
+    const observedPane = await observeSolePane(this.tmuxAdapter, canonicalSessionName);
+    if (!observedPane.ok && observedPane.code === "tmux_unavailable") {
+      return {
+        ok: false,
+        code: "tmux_probe_failed",
+        message: `${observedPane.detail}; fresh launch refuses rather than kill without live occupant identity.`,
+      };
+    }
+    if (!observedPane.ok || observedPane.pane !== currentBinding?.tmuxPane) {
+      return {
+        ok: false,
+        code: "unmanaged_session_collision",
+        message: `Canonical tmux session "${canonicalSessionName}" is live, but its pane does not match this seat's current managed binding; refusing to stop it.`,
+      };
+    }
+    return currentSession!;
+  }
+
+  /** Check every historical row/binding that clean would touch before stopping anything. */
+  private async validateFreshHistory(nodeId: string, canonicalSessionName: string): Promise<SeatRefusal | null> {
+    const rows = this.nonTerminalSessions(nodeId);
+    if (rows.some(row => row.origin === "claimed")) {
+      return { ok: false, code: "claimed_session", message: "Fresh launch refuses adopted/operator-owned occupants, even with --stop." };
+    }
+    const binding = this.sessionRegistry.getBindingForNode(nodeId);
+    const names = new Set([...rows.map(row => row.session_name), ...(binding?.tmuxSession ? [binding.tmuxSession] : [])]);
+    for (const name of names) {
+      if (name === canonicalSessionName) continue;
+      const probe = await this.probeLiveness(name, "fresh launch refuses while historical occupant state is unknown");
+      if ("code" in probe) return probe;
+      if (probe.state === "present") return { ok: false, code: "session_live", message: "A historical occupant is still live; fresh launch refuses to change this seat." };
+    }
+    return null;
+  }
+
   /** Deliberately replace exactly one managed seat with a blank native occupant. */
   async launchFresh(input: {
     seatRef: string;
@@ -496,15 +555,9 @@ export class SeatLifecycleService {
     const prepared = this.resolveFreshLaunch(resolved, input.seatRef);
     if ("code" in prepared) return prepared;
     const { seat, node, adapter, startup, canonicalSessionName, nodeLauncher, startupOrchestrator } = prepared;
+    const historyRefusal = await this.validateFreshHistory(resolved.nodeId, canonicalSessionName);
+    if (historyRefusal) return historyRefusal;
     const retiringRows = this.nonTerminalSessions(node.id);
-    if (retiringRows.some((row) => row.origin === "claimed")) {
-      return {
-        ok: false,
-        code: "claimed_session",
-        message: `Seat "${input.seatRef}" has an adopted/operator-owned occupant; fresh launch refuses even with --stop.`,
-        guidance: "Stop the adopted process yourself, then run rig seat clean before launching fresh.",
-      };
-    }
     // Detached is terminal for process cleanup, but remains a reboot candidate.
     // A deliberate fresh launch must retire that prior history as well.
     const supersededSessionIds = (this.db.prepare(
@@ -549,43 +602,8 @@ export class SeatLifecycleService {
     }
     if ("code" in canonicalProbe) return canonicalProbe;
     if (canonicalProbe.state === "present") {
-      const currentSession = this.latestSession(node.id);
-      const currentBinding = this.sessionRegistry.getBindingForNode(node.id);
-      const currentManaged = currentSession !== null
-        && !TERMINAL_SESSION_STATUSES.has(currentSession.status)
-        && currentSession.origin !== "claimed"
-        && currentSession.session_name === canonicalSessionName
-        && currentBinding?.tmuxSession === canonicalSessionName;
-      if (!currentManaged) {
-        return {
-          ok: false,
-          code: "unmanaged_session_collision",
-          message: `Canonical tmux session "${canonicalSessionName}" exists but is not owned by this seat's current managed rows; refusing to overwrite it.`,
-        };
-      }
-      if (!input.stop) {
-        return {
-          ok: false,
-          code: "session_live",
-          message: `Seat "${input.seatRef}" is live; fresh launch refuses without --stop.`,
-          guidance: "Re-run with --stop to end exactly this managed occupant, or use rig handover to carry context.",
-        };
-      }
-      const observedPane = await observeSolePane(this.tmuxAdapter, canonicalSessionName);
-      if (!observedPane.ok && observedPane.code === "tmux_unavailable") {
-        return {
-          ok: false,
-          code: "tmux_probe_failed",
-          message: `${observedPane.detail}; fresh launch refuses rather than kill without live occupant identity.`,
-        };
-      }
-      if (!observedPane.ok || observedPane.pane !== currentBinding?.tmuxPane) {
-        return {
-          ok: false,
-          code: "unmanaged_session_collision",
-          message: `Canonical tmux session "${canonicalSessionName}" is live, but its pane does not match this seat's current managed binding; refusing to stop it.`,
-        };
-      }
+      const currentSession = await this.validateFreshCollision(resolved, canonicalSessionName, input.stop === true);
+      if ("code" in currentSession) return currentSession;
       const stopped = await this.stopManagedTmuxSeat(
         resolved,
         currentSession,
