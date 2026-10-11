@@ -121,6 +121,15 @@ export function resolveConcreteHint(
   return "send_text";
 }
 
+/** A display-only fresh-launch shape, never a command to execute or a readiness check. */
+export interface RuntimeLaunchPreview {
+  status: "available" | "partial" | "unknown";
+  executable: false;
+  /** Dynamic values are placeholders; a shell comment prevents accidental execution. */
+  commandTemplate: string | null;
+  warnings: string[];
+}
+
 // -- Runtime adapter contract --
 
 /**
@@ -175,6 +184,11 @@ export interface RuntimeAdapter {
     binding: NodeBinding,
     opts: { name: string; resumeToken?: string; forkSource?: ForkSource },
   ): Promise<HarnessLaunchResult>;
+
+  /** Read-only, fresh-start preview. Never probes native clients, provisions files,
+   * mints launch identity, calls launchHarness(), or sends input to a terminal.
+   * Do not return environment values, credentials, startup text, or executable commands. */
+  previewLaunch?(binding: NodeBinding, opts: { name: string }): Promise<RuntimeLaunchPreview>;
 
   /** Check if the runtime harness is responsive and ready. */
   checkReady(binding: NodeBinding): Promise<ReadinessResult>;

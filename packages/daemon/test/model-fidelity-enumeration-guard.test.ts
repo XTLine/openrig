@@ -47,13 +47,19 @@ describe("0.5.2-07 A2-3 — model-fidelity enumeration guard", () => {
 
   it("claude adapter: every claude seat-launch template threads modelArg", () => {
     const src = read("adapters/claude-code-adapter.ts");
-    const templates = [...src.matchAll(/`(?:\$\{claudeResumeLaunchPrefix\([^)]*\)\})?(?:\$\{rendererPrefix\})?claude \$\{[^`]*`/g)].map((m) => m[0]);
+    const templates = [...src.matchAll(/`(?:\$\{claudeResumeLaunchPrefix\([^)]*\)\})?(?:\$\{(?:input\.)?rendererPrefix\})?claude \$\{[^`]*`/g)].map((m) => m[0]);
     const seatLaunches = templates.filter((t) => /--resume|--session-id|--fork-session/.test(t));
     // fresh (--session-id), resume (--resume … --name), fork (--resume … --fork-session).
     expect(seatLaunches.length).toBeGreaterThanOrEqual(3);
     for (const t of seatLaunches) {
       expect(t, `claude seat-launch template must thread modelArg:\n${t}`).toContain("modelArg");
     }
+  });
+
+  it("shared Claude fresh builders receive the current model and effort from execution", () => {
+    const src = read("adapters/claude-code-adapter.ts");
+    expect(src).toMatch(/buildClaudeFreshCommand\(\{ rendererPrefix, posture: permissionMode, model, effort, sessionId:/);
+    expect(src).toMatch(/buildClaudeFreshArgs\(\{ permissionMode: binding\.permissionMode!, operational:[^\n]*, model, effort, sessionId:/);
   });
 
   it("legacy resume builders (claude-resume + codex-resume) thread the model", () => {
@@ -82,7 +88,7 @@ describe("0.5.2-07 A2-3 — model-fidelity enumeration guard", () => {
     }
 
     const claudeSrc = read("adapters/claude-code-adapter.ts");
-    const claudeTemplates = [...claudeSrc.matchAll(/`(?:\$\{claudeResumeLaunchPrefix\([^)]*\)\})?(?:\$\{rendererPrefix\})?claude \$\{[^`]*`/g)].map((m) => m[0]);
+    const claudeTemplates = [...claudeSrc.matchAll(/`(?:\$\{claudeResumeLaunchPrefix\([^)]*\)\})?(?:\$\{(?:input\.)?rendererPrefix\})?claude \$\{[^`]*`/g)].map((m) => m[0]);
     const claudeSeatLaunches = claudeTemplates.filter((t) => /--resume|--session-id|--fork-session/.test(t));
     expect(claudeSeatLaunches.length).toBeGreaterThanOrEqual(3);
     for (const t of claudeSeatLaunches) {

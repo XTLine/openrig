@@ -8,7 +8,7 @@ import { claudePostureFlag, claudeClassicRendererEnvPrefix } from "./yolo-mode.j
 import type {
   RuntimeAdapter, NodeBinding, ResolvedStartupFile,
   InstalledResource, ProjectionResult, StartupDeliveryResult, ReadinessResult,
-  HarnessLaunchResult,
+  HarnessLaunchResult, RuntimeLaunchPreview,
 } from "../domain/runtime-adapter.js";
 import { resolveConcreteHint } from "../domain/runtime-adapter.js";
 import type { ProjectionPlan, ProjectionEntry } from "../domain/projection-planner.js";
@@ -233,6 +233,34 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     return { delivered, failed, ...(warnings.length ? { warnings } : {}) };
   }
 
+  async previewLaunch(binding: NodeBinding, _opts: { name: string }): Promise<RuntimeLaunchPreview> {
+    const managed = binding.permissionMode !== undefined;
+    const warnings: string[] = [];
+    if (managed || binding.launchPosture === "auto") {
+      warnings.push("Claude permission-mode support and managed executable selection are not probed.");
+    }
+    // Settings can embed host paths and hook commands; expose only their presence.
+    const operational = operationalLaunchArgs(this.runtime, binding)
+      .map(arg => arg === "--settings" ? arg : "<settings>");
+    const operationalArg = operational.map(arg => ` ${shellQuote(arg)}`).join("");
+    const posture = managed ? "--permission-mode <permission-mode>"
+      : claudePostureFlag(process.env, binding.launchPosture);
+    const environment = managed ? "<managed-launch-environment> "
+      : this.seatLaunchEnvironment ? "<seat-launch-environment> "
+        : claudeClassicRendererEnvPrefix(process.env) ? "<renderer-environment> " : "";
+    return { status: warnings.length ? "partial" : "available", executable: false,
+      commandTemplate: "# Preview only: " + (managed
+        ? environment + "<claude-executable> " + buildClaudeFreshArgs({
+          permissionMode: "<permission-mode>", operational,
+          model: binding.model?.trim() ? "<model>" : undefined, effort: binding.effort?.trim() ? "<effort>" : undefined,
+          sessionId: "<session-id>", name: "<session-name>",
+        }).map(shellQuote).join(" ")
+        : buildClaudeFreshCommand({ rendererPrefix: environment, posture: posture + operationalArg,
+          model: binding.model?.trim() ? "<model>" : undefined, effort: binding.effort?.trim() ? "<effort>" : undefined,
+          sessionId: "<session-id>", name: "<session-name>",
+        })), warnings };
+  }
+
   async launchHarness(
     binding: NodeBinding,
     opts: { name: string; resumeToken?: string; forkSource?: import("../domain/runtime-adapter.js").ForkSource },
@@ -324,11 +352,12 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     }
 
     const generatedSessionId = opts.resumeToken ? null : this.sessionIdFactory();
-    const cmd = managed ? managed.command(["--permission-mode", binding.permissionMode!, ...operationalLaunchArgs(this.runtime, binding), ...(model ? ["--model", model] : []), ...(effort ? ["--effort", effort] : []),
-      ...(opts.resumeToken ? ["--resume", opts.resumeToken] : ["--session-id", generatedSessionId!]), "--name", opts.name],
+    const cmd = managed ? managed.command(opts.resumeToken
+      ? ["--permission-mode", binding.permissionMode!, ...operationalLaunchArgs(this.runtime, binding), ...(model ? ["--model", model] : []), ...(effort ? ["--effort", effort] : []), "--resume", opts.resumeToken, "--name", opts.name]
+      : buildClaudeFreshArgs({ permissionMode: binding.permissionMode!, operational: operationalLaunchArgs(this.runtime, binding), model, effort, sessionId: generatedSessionId!, name: opts.name }),
       opts.resumeToken ? claudeResumeLaunchEnv(opts.resumeToken) : undefined) : opts.resumeToken
       ? `${claudeResumeLaunchPrefix(opts.resumeToken)}${rendererPrefix}claude ${permissionMode}${modelArg}${effortArg} --resume ${shellQuote(opts.resumeToken)} --name ${opts.name}`
-      : `${rendererPrefix}claude ${permissionMode}${modelArg}${effortArg} --session-id ${generatedSessionId} --name ${opts.name}`;
+      : buildClaudeFreshCommand({ rendererPrefix, posture: permissionMode, model, effort, sessionId: generatedSessionId!, name: opts.name });
 
     const textResult = managed ? await this.tmux.sendShellCommand(binding.tmuxSession, cmd, managed.assertCurrent)
       : this.seatLaunchEnvironment
@@ -1162,4 +1191,22 @@ export function readClaudeSelfReportEvidence(input: {
   } catch {
     return null; // unreadable dir ⇒ fall down the ladder
   }
+}
+
+/** Shared fresh command shape; callers own preparation and transport. */
+function buildClaudeFreshCommand(input: {
+  rendererPrefix: string; posture: string; model?: string; effort?: string; sessionId: string; name: string;
+}): string {
+  const modelArg = input.model ? ` --model ${shellQuote(input.model)}` : "";
+  const effortArg = input.effort ? ` --effort ${shellQuote(input.effort)}` : "";
+  return `${input.rendererPrefix}claude ${input.posture}${modelArg}${effortArg} --session-id ${input.sessionId} --name ${input.name}`;
+}
+
+/** The managed wrapper owns executable/environment selection; these are fresh harness arguments. */
+function buildClaudeFreshArgs(input: {
+  permissionMode: string; operational: string[]; model?: string; effort?: string; sessionId: string; name: string;
+}): string[] {
+  return ["--permission-mode", input.permissionMode, ...input.operational,
+    ...(input.model ? ["--model", input.model] : []), ...(input.effort ? ["--effort", input.effort] : []),
+    "--session-id", input.sessionId, "--name", input.name];
 }

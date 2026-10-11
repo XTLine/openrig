@@ -20,7 +20,7 @@ import { yoloEnabled, type ResolvedLaunchPosture } from "./yolo-mode.js";
 import type {
   RuntimeAdapter, NodeBinding, ResolvedStartupFile,
   InstalledResource, ProjectionResult, StartupDeliveryResult, ReadinessResult,
-  HarnessLaunchResult, ForkSource,
+  HarnessLaunchResult, ForkSource, RuntimeLaunchPreview,
 } from "../domain/runtime-adapter.js";
 import { resolveConcreteHint } from "../domain/runtime-adapter.js";
 import type { ProjectionPlan, ProjectionEntry } from "../domain/projection-planner.js";
@@ -153,6 +153,17 @@ export class StubRuntimeAdapter implements RuntimeAdapter {
     }
 
     return { delivered, failed, ...(warnings.length ? { warnings } : {}) };
+  }
+
+  async previewLaunch(binding: NodeBinding, _opts: { name: string }): Promise<RuntimeLaunchPreview> {
+    if (!this.runnerEntryPath) return { status: "available", executable: false, commandTemplate: null,
+      warnings: ["Hermetic stub uses an in-memory launch record; no runner command is launched."] };
+    const core = buildStubRunnerCommand({
+      runnerEntryPath: "<runner-entry>", sessionName: "<session-name>", cwd: "<cwd>", launchId: "<launch-id>",
+      posture: yoloEnabled(process.env, binding.launchPosture) ? "full_bypass" : "floor",
+    });
+    return { status: "available", executable: false, commandTemplate: "# Preview only: " + core,
+      warnings: ["Stub runner availability and readiness are not checked."] };
   }
 
   async launchHarness(
