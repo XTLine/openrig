@@ -545,11 +545,13 @@ export class SeatLifecycleService {
     const blockers: Array<{ code: string; message: string }> = [];
     const warnings = ["Snapshot only; execution resolves and validates again. Native readiness is not checked."];
     let complete = true;
+    let tmuxUnknown = false;
     const guard = this.tmuxAdapter.deliveryGuard?.preference(node.id);
     if (guard?.effective || guard?.desired) blockers.push({ code: "typing_guard_enabled", message: "Typing protection blocks lifecycle operations for this seat." });
     const record = (error: SeatRefusal) => {
       if (error.code === "tmux_probe_failed") {
         complete = false;
+        tmuxUnknown = true;
         warnings.push("tmux state is unknown; no server was started and no occupant was changed.");
       } else blockers.push({ code: error.code, message: `Fresh launch would be refused: ${error.code}.` });
     };
@@ -602,7 +604,7 @@ export class SeatLifecycleService {
       ok: true as const, planOnly: true as const, complete, launchable, seat,
       sessionName: canonicalSessionName, runtime: node.runtime, cwd: node.cwd ?? ".",
       model: node.model, effort: node.effort ?? null, permission, currentOccupant,
-      stopRequired, wouldStop: blockers.length > 0 ? false : owned && input.stop === true ? true : stopRequired === null ? null : false,
+      stopRequired, wouldStop: blockers.length > 0 ? false : tmuxUnknown ? null : owned && input.stop === true,
       command, blockers, warnings, siblings,
       startup: { policyHash: startup.hash, projectionCount: startup.plan.entries.length,
         fileCount: startup.resolvedStartupFiles.filter(f => f.appliesOn.includes("fresh_start")).length,

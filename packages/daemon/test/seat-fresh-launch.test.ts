@@ -344,6 +344,117 @@ describe("SeatLifecycleService.launchFresh", () => {
     expect(tmux.killSession).not.toHaveBeenCalled();
   });
 
+  it.each(["live", "adopted", "collision", "pane", "history"])("previews a known %s blocker without mutation", async mode => {
+    const seat = seedSeat({ adopted: mode === "adopted", clean: mode === "collision" });
+    if (mode === "collision") alive.add(seat.sessionName);
+    if (mode === "pane") livePanes.set(seat.sessionName, "%other");
+    if (mode === "history") {
+      const old = sessionRegistry.registerSession(seat.node.id, "old@fresh-rig");
+      sessionRegistry.updateStatus(old.id, "running");
+      alive.add(old.sessionName);
+    }
+    const before = db.serialize();
+    const result = await service.planFresh({ seatRef: seat.sessionName, fresh: true, stop: mode !== "live" });
+    expect(result).toMatchObject({ ok: true, planOnly: true, launchable: false, wouldStop: false });
+    if (!result.ok) throw new Error("Expected resolved plan");
+    expect(result.blockers.map(b => b.code)).toContain(mode === "adopted" ? "claimed_session" : ["collision", "pane"].includes(mode) ? "unmanaged_session_collision" : "session_live");
+    expect(db.serialize()).toEqual(before);
+    expect(tmux.killSession).not.toHaveBeenCalled();
+    expect(tmux.startServer).not.toHaveBeenCalled();
+  });
+
+  it("keeps stop effects unknown when pane identity cannot be observed", async () => {
+    const seat = seedSeat();
+    vi.mocked(tmux.listPanes).mockRejectedValue(new Error("secret-pane-error"));
+    const result = await service.planFresh({ seatRef: seat.sessionName, fresh: true, stop: true });
+    expect(result).toMatchObject({ complete: false, launchable: null, currentOccupant: "present", stopRequired: null, wouldStop: null });
+    expect(JSON.stringify(result)).not.toContain("secret-pane-error");
+    expect(tmux.killSession).not.toHaveBeenCalled();
+  });
+
+  it("does not expose startup content or malformed JSON in a plan", async () => {
+    const seat = seedSeat({ clean: true });
+    const secret = "SECRET_STARTUP_CONTENT";
+    db.prepare("UPDATE node_startup_context SET startup_actions_json = ? WHERE node_id = ?").run(JSON.stringify([
+      { type: "send_text", value: secret, phase: "after_ready", appliesOn: ["fresh_start"], idempotent: true },
+    ]), seat.node.id);
+    const valid = await service.planFresh({ seatRef: seat.sessionName, fresh: true });
+    expect(valid).toMatchObject({ startup: { actionCount: 1 } });
+    expect(JSON.stringify(valid)).not.toContain(secret);
+    db.prepare("UPDATE node_startup_context SET startup_actions_json = ? WHERE node_id = ?").run(secret, seat.node.id);
+    const invalid = await service.planFresh({ seatRef: seat.sessionName, fresh: true });
+    expect(invalid).toMatchObject({ ok: false, planOnly: true, code: "startup_context_malformed" });
+    expect(JSON.stringify(invalid)).not.toContain(secret);
+  });
+
+  it("execution resolves again when state changes after preview", async () => {
+    const seat = seedSeat({ clean: true });
+    adapter.previewLaunch = async () => ({ status: "available", executable: false, commandTemplate: null, warnings: [] });
+    expect(await service.planFresh({ seatRef: seat.sessionName, fresh: true })).toMatchObject({ launchable: true });
+    alive.add(seat.sessionName);
+    expect(await service.launchFresh({ seatRef: seat.sessionName, fresh: true, stop: true, reason: "execute after preview" }))
+      .toMatchObject({ ok: false, code: "unmanaged_session_collision" });
+    expect(tmux.killSession).not.toHaveBeenCalled();
+    expect(tmux.createSession).not.toHaveBeenCalled();
+  });
+
+  it.each(["missing", "runtime", "adapter", "ambiguous"])("refuses invalid %s preview inputs before native observation", async mode => {
+    const seat = seedSeat({ clean: true, withContext: mode !== "missing" });
+    if (mode === "runtime") db.prepare("UPDATE node_startup_context SET runtime = 'codex' WHERE node_id = ?").run(seat.node.id);
+    if (mode === "adapter") {
+      db.prepare("UPDATE nodes SET runtime = 'terminal' WHERE id = ?").run(seat.node.id);
+      db.prepare("UPDATE node_startup_context SET runtime = 'terminal' WHERE node_id = ?").run(seat.node.id);
+    }
+    if (mode === "ambiguous") rigRepo.addNode(rigRepo.createRig("other-rig").id, "dev.impl", { runtime: "claude-code" });
+    const result = await service.planFresh({ seatRef: "dev.impl", fresh: true });
+    const code = { missing: "startup_context_missing", runtime: "startup_context_runtime_mismatch", adapter: "runtime_adapter_missing", ambiguous: "seat_ambiguous" }[mode];
+    expect(result).toMatchObject({ ok: false, planOnly: true, launchable: false, code });
+    expect(tmux.probeSession).not.toHaveBeenCalled();
+    expect(tmux.startServer).not.toHaveBeenCalled();
+    expect(tmux.createSession).not.toHaveBeenCalled();
+  });
+
+  it("reports typing protection without acquiring or modifying a lifecycle lock", async () => {
+    const seat = seedSeat({ clean: true });
+    const lifecycle = vi.fn();
+    Object.defineProperty(tmux, "deliveryGuard", { value: { preference: () => ({ desired: true, effective: true }), lifecycle } });
+    const result = await service.planFresh({ seatRef: seat.sessionName, fresh: true });
+    expect(result).toMatchObject({ launchable: false, wouldStop: false, blockers: [{ code: "typing_guard_enabled" }] });
+    expect(lifecycle).not.toHaveBeenCalled();
+    expect(tmux.createSession).not.toHaveBeenCalled();
+  });
+
+  it("uses a captured sibling snapshot if the rig disappears during asynchronous observation", async () => {
+    const seat = seedSeat({ clean: true });
+    vi.mocked(tmux.probeSession).mockImplementation(async () => {
+      vi.spyOn(rigRepo, "getRig").mockReturnValue(null);
+      return { state: "absent" };
+    });
+    expect(await service.planFresh({ seatRef: seat.sessionName, fresh: true })).toMatchObject({ ok: true, planOnly: true, siblings: [] });
+  });
+
+  it("passes persisted non-interruptive launch settings to the runtime preview", async () => {
+    const seat = seedSeat({ clean: true });
+    rigRepo.setRigNonInterruptive(seat.rig.id, true);
+    adapter.previewLaunch = vi.fn(async () => ({ status: "available", executable: false, commandTemplate: null, warnings: [] }));
+    await service.planFresh({ seatRef: seat.sessionName, fresh: true });
+    expect(adapter.previewLaunch).toHaveBeenCalledWith(expect.objectContaining({ nonInterruptive: true, cwd: "/project", model: "claude-current" }), { name: seat.sessionName });
+  });
+
+  it("does not promise a stop when a historical tmux probe is unknown", async () => {
+    const seat = seedSeat();
+    const historical = sessionRegistry.registerSession(seat.node.id, "old@fresh-rig");
+    sessionRegistry.updateStatus(historical.id, "running");
+    vi.mocked(tmux.probeSession).mockImplementation(async name => name === historical.sessionName
+      ? { state: "transport_unavailable", cause: "fixture" } : { state: "present" });
+    // Keep the canonical binding/row ownership proof independent of the history probe.
+    const current = sessionRegistry.registerSession(seat.node.id, seat.sessionName);
+    sessionRegistry.updateStatus(current.id, "running");
+    const result = await service.planFresh({ seatRef: seat.sessionName, fresh: true, stop: true });
+    expect(result).toMatchObject({ complete: false, launchable: null, wouldStop: null });
+    expect(tmux.killSession).not.toHaveBeenCalled();
+  });
+
   it("requires explicit fresh and a valid persisted startup context before mutation", async () => {
     const seat = seedSeat({ clean: true, withContext: false });
     const notExplicit = await service.launchFresh({ seatRef: "dev.impl", fresh: false, reason: "x" });
