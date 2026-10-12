@@ -17,7 +17,7 @@ import { piTrust, yoloEnabled } from "./yolo-mode.js";
 import type {
   RuntimeAdapter, NodeBinding, ResolvedStartupFile,
   InstalledResource, ProjectionResult, StartupDeliveryResult, ReadinessResult,
-  HarnessLaunchResult, ForkSource, RuntimeLaunchPreview,
+  HarnessLaunchResult, ForkSource,
 } from "../domain/runtime-adapter.js";
 import { resolveConcreteHint } from "../domain/runtime-adapter.js";
 import type { ProjectionPlan, ProjectionEntry } from "../domain/projection-planner.js";
@@ -198,26 +198,6 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
     }
 
     return { delivered, failed, ...(warnings.length ? { warnings } : {}) };
-  }
-
-  /**
-   * Describe the Pi/OMP runner command from the binding's model and launch posture.
-   * Reuse the execution builder with redacted paths, identities and model values;
-   * do not create runner directories/sidecars or inspect credentials or readiness.
-   * An available template describes command structure, not native-client availability.
-   */
-  async previewLaunch(binding: NodeBinding, _opts: { name: string }): Promise<RuntimeLaunchPreview> {
-    const trust = this.runtime === "omp"
-      ? (yoloEnabled(process.env, binding.launchPosture) ? "approve" : "no-approve")
-      : piTrust(this.trustPosture, process.env, binding.launchPosture);
-    const core = buildPiRunnerCommand({
-      runtime: this.runtime, runnerEntryPath: "<runner-entry>", sessionName: "<session-name>",
-      stateRoot: "<state-root>", cwd: "<cwd>", launchId: "<launch-id>", trust,
-      model: binding.model?.trim() ? "<model>" : undefined,
-    });
-    const environment = this.runtime === "pi" && this.seatLaunchEnvironment ? "<seat-launch-environment> " : "";
-    return { status: "available", executable: false, commandTemplate: "# Preview only: " + environment + core,
-      warnings: ["Runner and native client availability, credentials, and readiness are not checked."] };
   }
 
   async launchHarness(

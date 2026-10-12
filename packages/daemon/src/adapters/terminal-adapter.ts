@@ -7,7 +7,6 @@ import type {
   ReadinessResult,
   ResolvedStartupFile,
   HarnessLaunchResult,
-  RuntimeLaunchPreview,
 } from "../domain/runtime-adapter.js";
 import type { ProjectionPlan } from "../domain/projection-planner.js";
 
@@ -30,16 +29,6 @@ export class TerminalAdapter implements RuntimeAdapter {
 
   async deliverStartup(_files: ResolvedStartupFile[], _binding: NodeBinding): Promise<StartupDeliveryResult> {
     return { delivered: 0, failed: [] };
-  }
-
-  /**
-   * Report that terminal seats retain their shell and have no harness command.
-   * A null template is intentional, not a failed probe; startup actions are separate
-   * and are neither replayed nor inspected by this side-effect-free preview.
-   */
-  async previewLaunch(_binding: NodeBinding, _opts: { name: string }): Promise<RuntimeLaunchPreview> {
-    return { status: "available", executable: false, commandTemplate: null,
-      warnings: ["Terminal reuses its shell; there is no harness command. Startup actions are separate."] };
   }
 
   async launchHarness(
