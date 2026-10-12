@@ -1,3 +1,4 @@
+import { CODEX_TURN_STATUS_PATTERN } from "../codex-pane-patterns.js";
 import {
   AGENT_ACTIVITY_FRESHNESS_MS,
   type AgentActivityStore,
@@ -25,8 +26,7 @@ const RESET_RE = /try again at ([^.!\n]+)/i;
 // not the seat's own state.
 const FENCE_RE = /^\s*```/;
 
-// The input line starts the composer's input area: everything from it down is
-// input area, including draft text and indentation, whatever the footer format.
+// A prompt can be a draft composer or a submitted message; its suffix decides.
 const INPUT_LINE_RE = /^\s*›(?:\s|$)/;
 
 /**
@@ -78,14 +78,20 @@ function isFenced(lines: string[], index: number): boolean {
 }
 
 function isMostRecent(lines: string[], index: number): boolean {
-  // The input line starts the input area: everything from it down is input
-  // area whatever the footer format. Search for it only after the banner
-  // block — an input-like line above the banner must not mask newer output
-  // below it. Use the last composer so an earlier submitted prompt cannot
-  // hide intervening output. Before it, only blank lines may follow the block.
+  // Before the last possible composer, only blanks may follow the banner.
+  // A live turn-status row after that prompt proves it was submitted history,
+  // not an input boundary. Keep indented draft continuations as user text.
   const after = lines.slice(index + 1);
   let inputAt = after.length - 1;
   while (inputAt >= 0 && !INPUT_LINE_RE.test(after[inputAt]!)) inputAt--;
+  if (inputAt >= 0) {
+    const indent = after[inputAt]!.search(/\S/);
+    if (after.slice(inputAt + 1).some((line, offset) => {
+      const text = line.trimStart();
+      return line.length - text.length <= indent && CODEX_TURN_STATUS_PATTERN.test(text) &&
+        !isFenced(after, inputAt + 1 + offset);
+    })) return false;
+  }
   const tail = inputAt < 0 ? after : after.slice(0, inputAt);
   return tail.every((line) => /^\s*$/.test(line));
 }

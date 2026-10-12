@@ -73,6 +73,37 @@ describe("detectCodexLimitBanner", () => {
     expect(detectCodexLimitBanner(pane)).toBeNull();
   });
 
+  it.each([
+    "◦ Working (2s • esc to interrupt)",
+    "• Reviewing changes (1h 09m 39s • esc to interrupt) · 1 background terminal running",
+  ].flatMap(status => ["", "  "].flatMap(indent => ["", "\n› Ask Codex to do anything"].map(composer => ({
+    status, indent, composer,
+  })))))("ends an old banner before newer turn output: %j", ({ status, indent, composer }) => {
+    expect(detectCodexLimitBanner(`${BANNER}\n${indent}› Continue the task\n${indent}${status}${composer}`)).toBeNull();
+  });
+
+  it.each(["", "  "])("keeps a banner above a multiline draft with indent %j", (indent) => {
+    const pane = `${BANNER}\n${indent}› Explain this status:\n${indent}  ◦ Working (2s • esc to interrupt)`;
+    expect(detectCodexLimitBanner(pane)).toMatchObject({ resetText: "4:14 AM" });
+  });
+
+  it.each(["Working on the draft", "Show me what esc to interrupt means", "gpt-6-astra xhigh · Working directory"])(
+    "does not mistake composer/footer prose for turn output: %j", (text) => {
+      expect(detectCodexLimitBanner(`${BANNER}\n› Continue the task\n${text}`)).toMatchObject({ resetText: "4:14 AM" });
+    },
+  );
+
+  it.each(["> ◦ Working (2s • esc to interrupt)", "```\n◦ Working (2s • esc to interrupt)\n```"])(
+    "keeps quoted status below a draft: %j", (quoted) => {
+      expect(detectCodexLimitBanner(`${BANNER}\n› Explain this status:\n${quoted}`)).toMatchObject({ resetText: "4:14 AM" });
+    },
+  );
+
+  it("keeps a newer banner after a completed turn-status row", () => {
+    expect(detectCodexLimitBanner(`◦ Working (2s • esc to interrupt)\n${BANNER}\n› Continue the task`))
+      .toMatchObject({ resetText: "4:14 AM" });
+  });
+
   it("ignores a banner inside a fenced block the agent printed", () => {
     const pane = [
       "here is what the error looked like:",
@@ -474,6 +505,49 @@ describe("codex-limit-banner — store mapping and seat status", () => {
       expect((await structuralActivity.pollSeat(sessionName, null, "codex"))?.state).toBe("agent_active");
       expect(store.getLatestForNode({ sessionName })).toMatchObject({ reason: "usage_limit_cleared" });
     } finally { db.close(); }
+  });
+
+  it("recovers on every poll when a submitted prompt is followed by work without a composer", async () => {
+    const db = createFullTestDb();
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      const { sessionName } = seedCodexSeat(db);
+      let clock = NOW;
+      const deps = { db, eventBus: new EventBus(db), now: () => clock, resolveOccupantGeneration: () => "current-generation" };
+      const store = new AgentActivityStore(deps);
+      const capturePaneContent = vi.fn(async () => BANNER);
+      const structuralActivity = new SeatStructuralActivityService({ capturePaneContent }, () => clock);
+      structuralActivity.attachCodexLimitBanner((sessionName, banner, at) => {
+        recordCodexLimitBanner({ store, resolveGeneration: () => "current-generation", sessionName, banner, now: () => at });
+      });
+      await structuralActivity.pollSeat(sessionName, null, "codex");
+      expect(store.getLatestForNode({ sessionName })).toMatchObject({ reason: "usage_limit" });
+      capturePaneContent.mockResolvedValue(`${BANNER}\n› Continue the task\n◦ Working (2s • esc to interrupt)`);
+      for (let poll = 1; poll <= 2; poll++) {
+        clock = new Date(NOW.getTime() + poll * 1000);
+        expect((await structuralActivity.pollSeat(sessionName, null, "codex"))?.state).toBe("agent_active");
+        expect.soft(new AgentActivityStore(deps).getLatestForNode({ sessionName })).toMatchObject({ reason: "usage_limit_cleared" });
+        const motion = new SeatActivityService({ tmux: { readPaneLastActivity: async () => clock.getTime() / 1000 }, defaultWindowSeconds: 3, now: () => clock });
+        await motion.pollSeat(sessionName);
+        const out = await attachAgentActivity(entries(sessionName), {
+          tmuxAdapter: { capturePaneContent } as never, activityStore: store, structuralActivity, seatActivity: motion, now: clock,
+        });
+        expect.soft(out[0]!.agentActivity).toMatchObject({ state: "running", reason: "mid_work_pattern" });
+        log.mockClear();
+        await psCommand({
+          lifecycleDeps: {
+            exists: (path) => path === STATE_FILE,
+            readFile: () => JSON.stringify({ pid: 1, port: 1, db: "fixture.sqlite", startedAt: NOW.toISOString() }),
+            isProcessAlive: () => true, fetch: async () => ({ ok: true }),
+          } as never,
+          clientFactory: () => ({ get: async (path: string) => ({ status: 200, data: path.includes("/nodes")
+            ? [{ canonicalSessionName: sessionName, logicalId: "dev.qa", agentActivity: out[0]!.agentActivity }]
+            : [{ rigId: "fixture", rigName: "test-rig", status: "running" }] }) }) as never,
+        }).parseAsync(["node", "rig", "--nodes", "--active", "--json", "--rig", "test-rig"]);
+        expect.soft(JSON.parse(log.mock.calls[0]![0])).toMatchObject({ totalNodes: 1, entries: [{ canonicalSessionName: sessionName }] });
+      }
+      expect.soft(db.prepare("SELECT COUNT(*) AS n FROM events WHERE type = 'agent.activity'").get()).toEqual({ n: 2 });
+    } finally { log.mockRestore(); db.close(); }
   });
 
   it("ends a limit durably after a valid newer poll, without inventing work", async () => {
