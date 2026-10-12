@@ -114,10 +114,13 @@ export class SeatStructuralActivityService {
     // #763: a Codex usage-limit banner is invisible to the hook vocabulary,
     // so the reactive tap never fires for it. Report what the seat shows, on
     // transition only (the recorder skips an already-reported banner). A poll
-    // with no current banner ends the episode in both memory and the store.
-    // Null/failed captures return above and never report a banner absence.
+    // ends the episode only with positive structural evidence and no banner.
+    // Null/failed, blank and unrecognized captures cannot establish recovery.
     if (runtime === "codex" && this.bannerEmitter) {
-      this.bannerEmitter(sessionName, detectCodexLimitBanner(content), at);
+      const banner = detectCodexLimitBanner(content);
+      if (banner || (content.trim().length > 0 && c.state !== "unknown")) {
+        this.bannerEmitter(sessionName, banner, at);
+      }
     }
     return obs;
   }

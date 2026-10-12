@@ -62,11 +62,11 @@ describe("detectCodexLimitBanner", () => {
     expect(detectCodexLimitBanner("output\n❯ ")).toBeNull();
   });
 
-  it("ignores a banner with a newer user message and reply below it", () => {
+  it.each(["❯", "›"])("ignores a banner with a newer %s user message and reply below it", (marker) => {
     const pane = [
       "■ You've hit your usage limit. try again at 4:14 AM.",
       "",
-      "❯ please continue with the task",
+      `${marker} please continue with the task`,
       "Done, I continued and finished the remaining work.",
       "› Ask Codex to do anything",
     ].join("\n");
@@ -105,6 +105,12 @@ describe("detectCodexLimitBanner", () => {
     ].join("\n");
     expect(detectCodexLimitBanner(pane)).toMatchObject({ resetText: "4:14 AM" });
   });
+
+  it.each(["› Continue the task", "  › Ask Codex to do anything"])(
+    "accepts a current banner above composer %j", (composer) => {
+      expect(detectCodexLimitBanner(`${BANNER}\n${composer}`)).toMatchObject({ resetText: "4:14 AM" });
+    },
+  );
 
   it("accepts any footer format below the input line", () => {
     const pane = [
@@ -430,6 +436,45 @@ describe("codex-limit-banner — store mapping and seat status", () => {
       }
     },
   );
+
+  it.each([
+    { name: "whitespace-only capture", frame: " \n\t\n  " },
+    { name: "unrecognized non-empty capture", frame: "unclassified output" },
+    { name: "banner above draft composer", frame: `${BANNER}\n› Continue the task` },
+    { name: "banner above indented empty composer", frame: `${BANNER}\n  › Ask Codex to do anything` },
+  ])("does not clear a current limit for $name", async ({ frame }) => {
+    const db = createFullTestDb();
+    try {
+      const { sessionName } = seedCodexSeat(db);
+      let clock = NOW;
+      const store = new AgentActivityStore({
+        db, eventBus: new EventBus(db), now: () => clock,
+        resolveOccupantGeneration: () => "current-generation",
+      });
+      const capturePaneContent = vi.fn(async () => BANNER);
+      const structuralActivity = new SeatStructuralActivityService({ capturePaneContent }, () => clock);
+      structuralActivity.attachCodexLimitBanner((sessionName, banner, at) => {
+        recordCodexLimitBanner({ store, resolveGeneration: () => "current-generation", sessionName, banner, now: () => at });
+      });
+      await structuralActivity.pollSeat(sessionName, null, "codex");
+      capturePaneContent.mockResolvedValue(frame);
+      for (let poll = 1; poll <= 2; poll++) {
+        clock = new Date(NOW.getTime() + poll * 1000);
+        await structuralActivity.pollSeat(sessionName, null, "codex");
+        expect.soft(store.getLatestForNode({ sessionName })).toMatchObject({ rawEvent: "at_limit", reason: "usage_limit" });
+        const out = await attachAgentActivity(entries(sessionName), {
+          tmuxAdapter: { capturePaneContent } as never, activityStore: store, structuralActivity,
+          seatActivity: await recentMotion(sessionName), now: clock,
+        });
+        expect.soft(out[0]!.agentActivity).toMatchObject({ reason: "usage_limit" });
+      }
+      expect(db.prepare("SELECT COUNT(*) AS n FROM events WHERE type = 'agent.activity'").get()).toEqual({ n: 1 });
+      capturePaneContent.mockResolvedValue("• Working (1s • esc to interrupt)\n› Ask Codex to do anything");
+      clock = new Date(NOW.getTime() + 3000);
+      expect((await structuralActivity.pollSeat(sessionName, null, "codex"))?.state).toBe("agent_active");
+      expect(store.getLatestForNode({ sessionName })).toMatchObject({ reason: "usage_limit_cleared" });
+    } finally { db.close(); }
+  });
 
   it("ends a limit durably after a valid newer poll, without inventing work", async () => {
     const db = createFullTestDb();

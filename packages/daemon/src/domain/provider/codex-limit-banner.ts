@@ -26,15 +26,15 @@ const RESET_RE = /try again at ([^.!\n]+)/i;
 const FENCE_RE = /^\s*```/;
 
 // The input line starts the composer's input area: everything from it down is
-// input area whatever the footer format, so the footer never needs matching.
-const INPUT_LINE_RE = /^›\s*(Ask Codex to do anything)?\s*$/;
+// input area, including draft text and indentation, whatever the footer format.
+const INPUT_LINE_RE = /^\s*›(?:\s|$)/;
 
 /**
  * Match the banner's own line form: the ■ marker must lead (after indent).
  * An agent quoting the sentence, or an error line merely containing the
  * words without the marker, never matches. A match inside a fenced code
  * block is quoted agent output, not seat state. And the banner must still be
- * the most recent content: anything below it other than the empty composer
+ * the most recent content: anything below it other than the composer
  * or footer (a user message, a reply, further output) means a recovered seat
  * whose old banner merely scrolled into view — Codex prints a new banner at
  * the bottom when the limit hits again, so that is still detected.
@@ -81,9 +81,11 @@ function isMostRecent(lines: string[], index: number): boolean {
   // The input line starts the input area: everything from it down is input
   // area whatever the footer format. Search for it only after the banner
   // block — an input-like line above the banner must not mask newer output
-  // below it. Before it, only blank lines may follow the block.
+  // below it. Use the last composer so an earlier submitted prompt cannot
+  // hide intervening output. Before it, only blank lines may follow the block.
   const after = lines.slice(index + 1);
-  const inputAt = after.findIndex((line) => INPUT_LINE_RE.test(line));
+  let inputAt = after.length - 1;
+  while (inputAt >= 0 && !INPUT_LINE_RE.test(after[inputAt]!)) inputAt--;
   const tail = inputAt < 0 ? after : after.slice(0, inputAt);
   return tail.every((line) => /^\s*$/.test(line));
 }
