@@ -240,10 +240,9 @@ describe("rig seat clean", () => {
 describe("fresh launch preview", () => {
   it.each([true, false, null].flatMap(launchable => [false, true].map(json => ({ launchable, json }))))("renders a read-only plan and its exit status: %j", async ({ launchable, json }) => {
     const data = { ok: true, planOnly: true, complete: launchable !== null, launchable,
-      sessionName: "dev@fixture", runtime: "stub", cwd: "/fixture", model: null, effort: null,
+      sessionName: "dev@fixture", currentOccupant: launchable === null ? "unknown" : "present",
+      startup: { projectionCount: 2, fileCount: 1, actionCount: 0 },
       stopRequired: launchable === null ? null : true, wouldStop: launchable === null ? null : launchable,
-      permission: { effectiveMode: "floor", source: "system_default" },
-      command: { executable: false, commandTemplate: "# Preview only: <runtime>", warnings: [] },
       blockers: launchable === false ? [{ code: "session_live", message: "Needs --stop" }] : [], warnings: [],
       siblings: [{ logicalId: "qa", effect: "unchanged" }] };
     const calls: Array<{ path: string; body: unknown }> = [];
@@ -252,11 +251,12 @@ describe("fresh launch preview", () => {
       "node", "rig", "seat", "launch", "dev@fixture", "--fresh", "--plan", ...(json ? ["--json"] : []),
     ]).then(() => undefined));
     expect(calls).toEqual([{ path: "/api/seat/launch-plan/dev%40fixture", body: { fresh: true, reason: undefined, stop: false, operator: undefined } }]);
-    expect(output.exitCode).toBe(launchable === true ? undefined : 1);
+    expect(output.exitCode).toBeUndefined();
     if (json) expect(JSON.parse(output.logs.join("\n"))).toEqual(data);
     else {
       expect(output.logs.join("\n")).toContain("no changes made");
-      expect(output.logs.join("\n")).toContain("not executable");
+      expect(output.logs.join("\n")).toContain("launchable:");
+      expect(output.logs.join("\n")).toContain("2 projections, 1 files, 0 actions");
       expect(output.logs.join("\n")).toContain("Sibling qa: unchanged");
       expect(output.logs.join("\n")).not.toContain("Fresh occupant ready");
     }

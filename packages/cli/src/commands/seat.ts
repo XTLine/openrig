@@ -540,7 +540,6 @@ identity remains unverified; a version number alone cannot clear it.
       process.exitCode = 1;
       return;
     }
-    if (path === "launch-plan" && res.data["launchable"] !== true) process.exitCode = 1;
     if (opts.json) {
       console.log(JSON.stringify(res.data, null, 2));
       if (res.status >= 400) process.exitCode = res.status >= 500 ? 2 : 1;
@@ -621,9 +620,10 @@ No resume, fork, rebuild, snapshot, checkpoint, or restore packet is used.
 A live managed seat requires --stop; adopted and unmanaged sessions are refused.
 Sibling seats stay attached and untouched. The runtime adapter composes a new
 command from current settings; launch does not replay a stored wrapper command.
+The seat launch environment and managed executable selection still apply.
 Preview is a read-only snapshot, not a reservation or a native readiness check.
-Unknown tmux or runtime details produce complete:false and a nonzero exit;
-command templates use redacted placeholders and cannot be executed.
+A successful preview exits 0; inspect launchable to decide whether launch is allowed.
+Unreadable tmux produces complete:false and unknown eligibility unless already blocked.
 Examples:
   rig seat launch dev.impl --fresh --plan --json
   rig seat launch dev-impl@my-rig --fresh --reason "deliberate blank restart"
@@ -644,14 +644,14 @@ Examples:
       }, opts, (data) => {
         if (opts.plan) {
           console.log(`Fresh launch preview: ${String(data["sessionName"])} (no changes made).`);
-          console.log(`Runtime: ${String(data["runtime"])}; cwd: ${String(data["cwd"])}; model: ${String(data["model"] ?? "none")}; effort: ${String(data["effort"] ?? "none")}.`);
+          console.log(`Current occupant: ${String(data["currentOccupant"])}.`);
           console.log(`Complete: ${String(data["complete"])}; launchable: ${data["launchable"] == null ? "unknown" : String(data["launchable"])}; stop required: ${data["stopRequired"] == null ? "unknown" : String(data["stopRequired"])}; would stop: ${data["wouldStop"] == null ? "unknown" : String(data["wouldStop"])}.`);
-          const permission = data["permission"] as { effectiveMode: string; source: string } | null;
-          if (permission) console.log(`Permission selection: ${permission.effectiveMode} (${permission.source}).`);
-          const command = data["command"] as { commandTemplate: string | null; warnings: string[] };
-          console.log(`Command template (not executable): ${command.commandTemplate ?? "unavailable"}`);
-          for (const blocker of data["blockers"] as Array<{ message: string }>) console.log(`Blocked: ${blocker.message}`);
-          for (const warning of command.warnings) console.warn(`Warning: ${warning}`);
+          for (const blocker of data["blockers"] as Array<{ message: string; guidance?: string }>) {
+            console.log(`Blocked: ${blocker.message}`);
+            if (blocker.guidance) console.log(blocker.guidance);
+          }
+          const startup = data["startup"] as { projectionCount: number; fileCount: number; actionCount: number };
+          console.log(`Startup: ${startup.projectionCount} projections, ${startup.fileCount} files, ${startup.actionCount} actions.`);
           for (const sibling of data["siblings"] as Array<{ logicalId: string }>) console.log(`Sibling ${sibling.logicalId}: unchanged.`);
           return;
         }
