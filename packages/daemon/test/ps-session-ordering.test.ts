@@ -78,4 +78,32 @@ describe("ps session ordering", () => {
       runningCount: 1, nodeCount: 2, status: "partial", lifecycleState: "degraded",
     });
   });
+
+  it.each([false, true])("excludes a confirmed-missing replacement from uptime (healthy sibling: %s)", (withSibling) => {
+    const old = registry.registerClaimedSession("n", "dev@ordering");
+    registry.updateStatus(old.id, "exited");
+    vi.setSystemTime(clock - 2_000);
+    registry.registerClaimedSession("n", "dev@ordering");
+    registry.updateBinding("n", { tmuxSession: "dev@ordering", tmuxPane: "%1" });
+    if (withSibling) {
+      vi.setSystemTime(clock + 4_000);
+      db.prepare("INSERT INTO nodes (id, rig_id, logical_id) VALUES ('peer', 'r', 'qa')").run();
+      registry.registerClaimedSession("peer", "qa@ordering");
+    }
+    vi.setSystemTime(clock + 10_000);
+    new SeatIdentityStore(db).upsert({
+      nodeId: "n", verdict: "pane_missing", reason: "session_missing",
+      evidenceSource: "tmux_session", sessionName: "dev@ordering",
+      evidence: { registeredPane: "%1", observedPid: null, observedCommand: null, matchedLayer: null },
+      observedAt: new Date().toISOString(),
+    });
+
+    const stored = db.prepare("SELECT * FROM sessions ORDER BY id").all();
+    expect(new PsProjectionService({ db }).getEntries()[0]).toMatchObject({
+      runningCount: withSibling ? 1 : 0,
+      status: withSibling ? "partial" : "stopped",
+      uptime: withSibling ? "6s" : null,
+    });
+    expect(db.prepare("SELECT * FROM sessions ORDER BY id").all()).toEqual(stored);
+  });
 });

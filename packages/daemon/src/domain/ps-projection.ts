@@ -216,10 +216,6 @@ export class PsProjectionService {
         r.name,
         r.archived_at as archived_at,
         (SELECT COUNT(*) FROM nodes n WHERE n.rig_id = r.id) as node_count,
-        (SELECT MIN((SELECT CASE WHEN s.status = 'running' THEN s.created_at END
-          FROM sessions s WHERE s.node_id = n.id ORDER BY s.id DESC LIMIT 1))
-          FROM nodes n WHERE n.rig_id = r.id
-        ) as earliest_running_at,
         (SELECT snap.created_at FROM snapshots snap WHERE snap.rig_id = r.id ORDER BY snap.created_at DESC, snap.id DESC LIMIT 1) as latest_snapshot_at,
         (SELECT COUNT(*) FROM snapshots snap WHERE snap.rig_id = r.id AND snap.kind = 'auto-periodic') as auto_periodic_count
       FROM rigs r
@@ -230,7 +226,6 @@ export class PsProjectionService {
       name: string;
       archived_at: string | null;
       node_count: number;
-      earliest_running_at: string | null;
       latest_snapshot_at: string | null;
       auto_periodic_count: number;
     }>;
@@ -246,6 +241,16 @@ export class PsProjectionService {
     // getNodeInventory query-set PER RIG — the rig-level N+1); indexed per rig below.
     const inventoryByRig = getNodeInventoryForAllRigs(this.db);
 
+    // Read the current registration's timestamp once per node, in one batch.
+    // Uptime membership comes from the same effective-running inventory below.
+    const sessionTimes = this.db.prepare(`
+      SELECT n.id as node_id,
+        (SELECT s.created_at FROM sessions s WHERE s.node_id = n.id ORDER BY s.id DESC LIMIT 1) as created_at
+      FROM nodes n JOIN rigs r ON r.id = n.rig_id
+      ${where}
+    `).all() as Array<{ node_id: string; created_at: string | null }>;
+    const sessionCreatedAt = new Map(sessionTimes.map((row) => [row.node_id, row.created_at]));
+
     return rows.map((r) => {
       // Derive rig-level lifecycleState by folding per-node states. FS-1 W1.2:
       // inventory for ALL rigs was built in ONE batched pass above (previously one
@@ -255,7 +260,13 @@ export class PsProjectionService {
       // Count the same current registrations used for lifecycle and activity.
       // Registry IDs stay monotonic through clock rollback within one daemon;
       // created_at does not. Reusing inventory also avoids another per-node sort.
-      const effectiveRunningCount = inventory.filter(isEffectivelyRunning).length;
+      const running = inventory.filter(isEffectivelyRunning);
+      const effectiveRunningCount = running.length;
+      let earliestRunningAt: string | null = null;
+      for (const node of running) {
+        const createdAt = sessionCreatedAt.get(node.nodeId);
+        if (createdAt != null && (earliestRunningAt === null || createdAt < earliestRunningAt)) earliestRunningAt = createdAt;
+      }
 
       const status: PsEntry["status"] =
         r.node_count === 0 ? "stopped"
@@ -324,7 +335,7 @@ export class PsProjectionService {
         hasWorkCount,
         status,
         lifecycleState,
-        uptime: r.earliest_running_at ? formatDuration(now - new Date(r.earliest_running_at + "Z").getTime()) : null,
+        uptime: earliestRunningAt ? formatDuration(now - new Date(earliestRunningAt + "Z").getTime()) : null,
         latestSnapshot: r.latest_snapshot_at ? formatAge(now - new Date(r.latest_snapshot_at + "Z").getTime()) : null,
         archivedAt: r.archived_at,
         isArchived: r.archived_at !== null,
