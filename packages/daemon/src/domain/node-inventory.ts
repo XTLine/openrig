@@ -1279,7 +1279,7 @@ export async function attachAgentActivity(
         },
       };
     }
-    // ACTIVITY D1+D2 — the MOTION reading, resolved once and applied to every exit below.
+    // ACTIVITY D1+D2 — the MOTION reading, resolved once for the activity ladder below.
     const motion = entry.canonicalSessionName
       ? deps.seatActivity?.getSeatActivity(entry.canonicalSessionName) ?? null
       : null;
@@ -1316,7 +1316,7 @@ export async function attachAgentActivity(
     })();
 
     /**
-     * ACTIVITY D1+D2 — ONE precedence rule, applied at EVERY exit of the ladder:
+     * ACTIVITY D1+D2 — precedence below, except for a current typed usage limit:
      *
      *     needs_input > running > MOTION > idle / unknown
      *
@@ -1376,12 +1376,13 @@ export async function attachAgentActivity(
     // even though its state is unknown by construction (it must never count
     // as waiting-on-a-person). Deliver it instead of the cached pane reading
     // so a limited seat shows the limit, not idle — but only while current.
+    // Terminal redraws are not recovery evidence and must not erase the limit.
     // A demoted row (aged out or generation-mismatched) falls through to the
     // structural reading like any other stale hook.
     if (hookActivity?.rawEvent === "at_limit" && hookActivity.stale !== true) {
       return {
         ...entry,
-        agentActivity: withMotion(hookActivity),
+        agentActivity: hookActivity,
       };
     }
 

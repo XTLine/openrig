@@ -4,6 +4,7 @@ import {
   clearRecordedBanner,
   recordCodexLimitBanner,
 } from "../src/domain/provider/codex-limit-banner.js";
+import { SeatActivityService } from "../src/domain/seat-activity-service.js";
 import { SeatStructuralActivityService } from "../src/domain/seat-structural-activity-service.js";
 import { AgentActivityStore } from "../src/domain/agent-activity-store.js";
 import {
@@ -289,22 +290,38 @@ describe("codex-limit-banner — store mapping and seat status", () => {
     }] as never;
   }
 
-  it("maps a recorded at_limit row to unknown/usage_limit, not idle — even with a cached idle pane", async () => {
+  async function recentMotion(sessionName: string) {
+    const service = new SeatActivityService({
+      tmux: { readPaneLastActivity: async () => NOW.getTime() / 1000 - 1 },
+      defaultWindowSeconds: 3,
+      now: () => NOW,
+    });
+    await service.pollSeat(sessionName);
+    return service;
+  }
+
+  it.each([false, true])("keeps a current limit over cached idle and terminal redraws (live motion: %s)", async (liveMotion) => {
     const db = createFullTestDb();
     try {
       const { sessionName } = seedCodexSeat(db);
-      const store = new AgentActivityStore({ db, eventBus: new EventBus(db), now: () => NOW });
+      const store = new AgentActivityStore({
+        db, eventBus: new EventBus(db), now: () => NOW,
+        resolveOccupantGeneration: () => "current-generation",
+      });
       const recorded = store.recordHookEvent({
         runtime: "codex",
         sessionName,
         hookEvent: "at_limit",
+        generation: "current-generation",
         subtype: "try again at 4:14 AM",
         occurredAt: "2026-10-06T23:59:00.000Z",
       });
       expect(recorded.ok).toBe(true);
 
+      const capturePaneContent = vi.fn(async () => BANNER);
       const out = (await attachAgentActivity(entries(sessionName), {
-        tmuxAdapter: { capturePaneContent: async () => BANNER } as never,
+        tmuxAdapter: { capturePaneContent } as never,
+        seatActivity: liveMotion ? await recentMotion(sessionName) : undefined,
         activityStore: store,
         // A cached idle pane reading must NOT cover the typed limit row.
         structuralActivity: {
@@ -320,38 +337,48 @@ describe("codex-limit-banner — store mapping and seat status", () => {
       // Carried through, not idle: unknown state (never needs_input, so the
       // send guard and retry logic don't read it as waiting on a person)
       // with the exact reason naming the block.
-      expect(out[0]!.agentActivity.state).toBe("unknown");
-      expect(out[0]!.agentActivity.reason).toBe("usage_limit");
+      expect(out[0]!.agentActivity).toMatchObject({
+        state: "unknown",
+        reason: "usage_limit",
+        evidenceSource: "runtime_hook",
+        rawEvent: "at_limit",
+        rawSubtype: "try again at 4:14 AM",
+        evidence: "try again at 4:14 AM",
+        stale: false,
+        generation: "current-generation",
+        generationProvenance: "resolved",
+      });
+      expect(capturePaneContent).not.toHaveBeenCalled();
     } finally {
       db.close();
     }
   });
 
-  it.each([
-    ["aged-out hook", { reason: "stale_runtime_hook", stale: true }],
-    ["generation-mismatched hook", { reason: "generation_mismatch", stale: true }],
-  ])("a demoted limit (%s) falls back to the structural reading", async (_label, verdict) => {
+  it.each(["stale_runtime_hook", "generation_mismatch"].flatMap(reason =>
+    [false, true].map(liveMotion => ({ reason, liveMotion })),
+  ))("a demoted limit ($reason) yields to structural activity and motion ($liveMotion)", async ({ reason, liveMotion }) => {
     const db = createFullTestDb();
     try {
       const { sessionName } = seedCodexSeat(db);
-      const store = new AgentActivityStore({ db, eventBus: new EventBus(db), now: () => NOW });
+      const store = new AgentActivityStore({
+        db, eventBus: new EventBus(db), now: () => NOW,
+        resolveOccupantGeneration: () => "current-generation",
+      });
       const recorded = store.recordHookEvent({
         runtime: "codex",
         sessionName,
         hookEvent: "at_limit",
         subtype: "try again at 4:14 AM",
-        occurredAt: "2026-10-06T23:50:00.000Z",
+        generation: reason === "generation_mismatch" ? "previous-generation" : "current-generation",
+        occurredAt: reason === "stale_runtime_hook" ? "2026-10-06T23:50:00.000Z" : NOW.toISOString(),
       });
       expect(recorded.ok).toBe(true);
 
+      expect(store.getLatestForNode({ sessionName })).toMatchObject({ reason, stale: true });
       const out = (await attachAgentActivity(entries(sessionName), {
         tmuxAdapter: { capturePaneContent: async () => BANNER } as never,
-        activityStore: {
-          getLatestForNode: () => ({
-            ...store.getLatestForNode({ sessionName })!,
-            ...verdict,
-          }),
-        } as never,
+        activityStore: store,
+        seatActivity: liveMotion ? await recentMotion(sessionName) : undefined,
         structuralActivity: {
           getStructuralActivity: () => ({
             state: "agent_idle",
@@ -362,7 +389,7 @@ describe("codex-limit-banner — store mapping and seat status", () => {
         } as never,
         now: NOW,
       } as never)) as Array<{ agentActivity: AgentActivity }>;
-      expect(out[0]!.agentActivity.reason).toBe("idle_prompt");
+      expect(out[0]!.agentActivity.reason).toBe(liveMotion ? "window_activity_motion" : "idle_prompt");
     } finally {
       db.close();
     }
