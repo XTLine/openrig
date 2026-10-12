@@ -360,7 +360,10 @@ describe("SeatLifecycleService.launchFresh", () => {
     if (!result.ok) throw new Error("Expected resolved plan");
     expect(result.blockers.map(b => b.code)).toContain(mode === "adopted" ? "claimed_session" : ["collision", "pane"].includes(mode) ? "unmanaged_session_collision" : "session_live");
     if (mode === "history") expect(result.blockers).toEqual(expect.arrayContaining([
-      expect.objectContaining({ message: "A historical occupant is still live; fresh launch refuses to change this seat." }),
+      expect.objectContaining({
+        message: 'Historical session "old@fresh-rig" is still live; fresh launch refuses to change this seat.',
+        guidance: "Stop a live seat first with: rig seat stop",
+      }),
     ]));
     expect(db.serialize()).toEqual(before);
     expect(tmux.killSession).not.toHaveBeenCalled();
@@ -532,7 +535,11 @@ describe("SeatLifecycleService.launchFresh", () => {
     alive.add(historical.sessionName);
     const before = db.serialize();
     const result = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, stop: true, reason: "history gate" });
-    expect(result).toMatchObject({ ok: false, code: "session_live" });
+    expect(result).toMatchObject({
+      ok: false, code: "session_live",
+      message: `Historical session "${historical.sessionName}" is still live; fresh launch refuses to change this seat.`,
+      guidance: "Stop a live seat first with: rig seat stop",
+    });
     expect(killed).toEqual([]);
     expect(db.serialize()).toEqual(before);
     expect(tmux.startServer).not.toHaveBeenCalled();

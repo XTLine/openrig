@@ -543,7 +543,11 @@ export class SeatLifecycleService {
       if (name === canonicalSessionName) continue;
       const probe = await this.probeLiveness(name, "fresh launch refuses while historical occupant state is unknown");
       if ("code" in probe) return probe;
-      if (probe.state === "present") return { ok: false, code: "session_live", message: "A historical occupant is still live; fresh launch refuses to change this seat." };
+      if (probe.state === "present") return {
+        ok: false, code: "session_live",
+        message: `Historical session "${name}" is still live; fresh launch refuses to change this seat.`,
+        guidance: "Stop a live seat first with: rig seat stop",
+      };
     }
     return null;
   }
