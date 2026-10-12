@@ -521,6 +521,9 @@ export function matchesRecordedHandoffTarget(
 ): boolean {
   if (!handedOffTo || !closureTarget) return false;
   if (closureTarget === handedOffTo) return true;
+  // Cross-host re-drives preserve the pre-convention member@rig@host target.
+  const legacy = /^(.+)@([A-Za-z0-9][A-Za-z0-9._-]*)$/.exec(closureTarget);
+  if (legacy?.[1] === handedOffTo) return true;
   const foreign = /^(qitem-[^@]+)@([^@]+)$/.exec(closureTarget);
   return foreign !== null && foreign[1] === deriveCrossHostSuccessorId(qitemId, handedOffTo, foreign[2]!);
 }
