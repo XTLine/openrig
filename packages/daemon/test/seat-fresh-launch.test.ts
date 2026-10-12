@@ -364,6 +364,23 @@ describe("SeatLifecycleService.launchFresh", () => {
     expect(tmux.startServer).not.toHaveBeenCalled();
   });
 
+  it("preserves the adopted seat name and manual cleanup guidance in plans and execution", async () => {
+    const seat = seedSeat({ adopted: true });
+    const expected = {
+      code: "claimed_session",
+      message: `Seat "${seat.sessionName}" has an adopted/operator-owned occupant; fresh launch refuses even with --stop.`,
+      guidance: "Stop the adopted process yourself, then run rig seat clean before launching fresh.",
+    };
+    const before = db.serialize();
+    expect(await service.planFresh({ seatRef: seat.sessionName, fresh: true, stop: true }))
+      .toMatchObject({ launchable: false, wouldStop: false, blockers: expect.arrayContaining([expected]) });
+    expect(db.serialize()).toEqual(before);
+    expect(await service.launchFresh({ seatRef: seat.sessionName, fresh: true, stop: true, reason: "fixture" }))
+      .toMatchObject({ ok: false, ...expected });
+    expect(tmux.killSession).not.toHaveBeenCalled();
+    expect(tmux.createSession).not.toHaveBeenCalled();
+  });
+
   it("keeps stop effects unknown when pane identity cannot be observed", async () => {
     const seat = seedSeat();
     vi.mocked(tmux.listPanes).mockRejectedValue(new Error("secret-pane-error"));

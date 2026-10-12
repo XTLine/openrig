@@ -528,10 +528,14 @@ export class SeatLifecycleService {
    * before any stop. Null means no historical blocker was observed; the caller must
    * still validate the canonical occupant and recheck absence before launching.
    */
-  private async validateFreshHistory(nodeId: string, canonicalSessionName: string): Promise<SeatRefusal | null> {
+  private async validateFreshHistory(nodeId: string, canonicalSessionName: string, seatRef: string): Promise<SeatRefusal | null> {
     const rows = this.nonTerminalSessions(nodeId);
     if (rows.some(row => row.origin === "claimed")) {
-      return { ok: false, code: "claimed_session", message: "Fresh launch refuses adopted/operator-owned occupants, even with --stop." };
+      return {
+        ok: false, code: "claimed_session",
+        message: `Seat "${seatRef}" has an adopted/operator-owned occupant; fresh launch refuses even with --stop.`,
+        guidance: "Stop the adopted process yourself, then run rig seat clean before launching fresh.",
+      };
     }
     const binding = this.sessionRegistry.getBindingForNode(nodeId);
     const names = new Set([...rows.map(row => row.session_name), ...(binding?.tmuxSession ? [binding.tmuxSession] : [])]);
@@ -565,7 +569,7 @@ export class SeatLifecycleService {
     const prepared = this.resolveFreshLaunch(resolved, input.seatRef);
     if ("code" in prepared) return refusal(prepared);
     const { seat, rig, node, startup, canonicalSessionName } = prepared;
-    const blockers: Array<{ code: string; message: string }> = [];
+    const blockers: Array<{ code: string; message: string; guidance?: string }> = [];
     const warnings = ["Snapshot only; execution resolves and validates again. Native readiness is not checked."];
     let complete = true;
     let tmuxUnknown = false;
@@ -576,9 +580,11 @@ export class SeatLifecycleService {
         complete = false;
         tmuxUnknown = true;
         warnings.push("tmux state is unknown; no server was started and no occupant was changed.");
+      } else if (error.code === "claimed_session") {
+        blockers.push({ code: error.code, message: error.message, guidance: error.guidance });
       } else blockers.push({ code: error.code, message: `Fresh launch would be refused: ${error.code}.` });
     };
-    const history = await this.validateFreshHistory(node.id, canonicalSessionName);
+    const history = await this.validateFreshHistory(node.id, canonicalSessionName, input.seatRef);
     if (history) record(history);
     const probe = await this.probeLiveness(canonicalSessionName, "preview does not repair tmux");
     const currentOccupant = "code" in probe ? "unknown" : probe.state;
@@ -642,7 +648,7 @@ export class SeatLifecycleService {
     const prepared = this.resolveFreshLaunch(resolved, input.seatRef);
     if ("code" in prepared) return prepared;
     const { seat, node, adapter, startup, canonicalSessionName, nodeLauncher, startupOrchestrator } = prepared;
-    const historyRefusal = await this.validateFreshHistory(resolved.nodeId, canonicalSessionName);
+    const historyRefusal = await this.validateFreshHistory(resolved.nodeId, canonicalSessionName, input.seatRef);
     if (historyRefusal) return historyRefusal;
     const retiringRows = this.nonTerminalSessions(node.id);
     // Detached is terminal for process cleanup, but remains a reboot candidate.
