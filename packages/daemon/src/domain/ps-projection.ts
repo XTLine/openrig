@@ -216,13 +216,9 @@ export class PsProjectionService {
         r.name,
         r.archived_at as archived_at,
         (SELECT COUNT(*) FROM nodes n WHERE n.rig_id = r.id) as node_count,
-        (SELECT COUNT(*) FROM nodes n WHERE n.rig_id = r.id AND
-          (SELECT status FROM sessions s WHERE s.node_id = n.id ORDER BY s.created_at DESC, s.id DESC LIMIT 1) = 'running'
-        ) as running_count,
-        (SELECT MIN(s.created_at) FROM sessions s
-          JOIN nodes n ON n.id = s.node_id
-          WHERE n.rig_id = r.id AND s.status = 'running'
-          AND s.id = (SELECT s2.id FROM sessions s2 WHERE s2.node_id = s.node_id ORDER BY s2.created_at DESC, s2.id DESC LIMIT 1)
+        (SELECT MIN((SELECT CASE WHEN s.status = 'running' THEN s.created_at END
+          FROM sessions s WHERE s.node_id = n.id ORDER BY s.id DESC LIMIT 1))
+          FROM nodes n WHERE n.rig_id = r.id
         ) as earliest_running_at,
         (SELECT snap.created_at FROM snapshots snap WHERE snap.rig_id = r.id ORDER BY snap.created_at DESC, snap.id DESC LIMIT 1) as latest_snapshot_at,
         (SELECT COUNT(*) FROM snapshots snap WHERE snap.rig_id = r.id AND snap.kind = 'auto-periodic') as auto_periodic_count
@@ -234,7 +230,6 @@ export class PsProjectionService {
       name: string;
       archived_at: string | null;
       node_count: number;
-      running_count: number;
       earliest_running_at: string | null;
       latest_snapshot_at: string | null;
       auto_periodic_count: number;
@@ -257,23 +252,10 @@ export class PsProjectionService {
       // getNodeInventory query-set per rig — the rig-level N+1); index it here.
       const inventory = inventoryByRig.get(r.rig_id) ?? [];
 
-      // Slice-05 item-5 (D5) — running honesty. The raw SQL `running_count` is
-      // the running BASE: it selects each node's latest session by
-      // `created_at DESC, id DESC` (the "newest session counts" contract). We
-      // must NOT re-derive that base from `inventory` — node-inventory picks the
-      // latest session by `id DESC` alone, a DIFFERENT ordering that diverges
-      // whenever session ids are not monotonic with created_at (pre-existing
-      // latent inconsistency, orthogonal to D5). Instead, subtract ONLY the
-      // status-running seats that are not EFFECTIVELY running — i.e. those
-      // carrying an applicable `session_missing` verdict — so a torn-down tmux
-      // session is never fabricated as running. The subtraction routes through
-      // the SAME isEffectivelyRunning predicate the activeCount gate uses below,
-      // so the two counts never disagree on liveness. NEVER mutates
-      // `sessions.status`.
-      const sessionMissingRunning = inventory.filter(
-        (n) => n.storedSessionStatus === "running" && !isEffectivelyRunning(n),
-      ).length;
-      const effectiveRunningCount = Math.max(0, r.running_count - sessionMissingRunning);
+      // Count the same current registrations used for lifecycle and activity.
+      // Registry IDs stay monotonic through clock rollback within one daemon;
+      // created_at does not. Reusing inventory also avoids another per-node sort.
+      const effectiveRunningCount = inventory.filter(isEffectivelyRunning).length;
 
       const status: PsEntry["status"] =
         r.node_count === 0 ? "stopped"
