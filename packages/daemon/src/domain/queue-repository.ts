@@ -515,6 +515,16 @@ export function deriveCrossHostSuccessorId(
   return `qitem-xh-${digest}`;
 }
 
+/** The retained next owner must describe this closure, not a handoff before a reopen. */
+export function matchesRecordedHandoffTarget(
+  qitemId: string, handedOffTo: string | null, closureTarget: string | null,
+): boolean {
+  if (!handedOffTo || !closureTarget) return false;
+  if (closureTarget === handedOffTo) return true;
+  const foreign = /^(qitem-[^@]+)@([^@]+)$/.exec(closureTarget);
+  return foreign !== null && foreign[1] === deriveCrossHostSuccessorId(qitemId, handedOffTo, foreign[2]!);
+}
+
 /** PL-007 — defensive column probe. Older test fixtures bypass the
  *  canonical migration list, so target_repo may be absent. Mirrors
  *  the `hasNodeColumn` pattern in rig-repository.ts. */
@@ -3952,9 +3962,9 @@ export class QueueRepository {
   }
 
   private handoffAdvisory(row: QueueItemRow): QueueItem["handoffAdvisory"] {
-    // Internal handoffs record the next owner; a generic update can also write
-    // handed-off, without that field or a successor. Only skip recorded handoffs.
-    if ((row.state === "handed-off" && row.handed_off_to !== null) || !isTerminalState(row.state)
+    // Generic updates can write handed-off and retain a previous handoff's owner
+    // after reopening. Skip only when that owner still matches this closure.
+    if ((row.state === "handed-off" && matchesRecordedHandoffTarget(row.qitem_id, row.handed_off_to, row.closure_target)) || !isTerminalState(row.state)
       || row.closure_reason !== "handed_off_to" || !row.closure_target) return undefined;
     const target = row.closure_target;
     try {
