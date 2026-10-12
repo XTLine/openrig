@@ -359,6 +359,9 @@ describe("SeatLifecycleService.launchFresh", () => {
     expect(result).toMatchObject({ ok: true, planOnly: true, launchable: false, wouldStop: false });
     if (!result.ok) throw new Error("Expected resolved plan");
     expect(result.blockers.map(b => b.code)).toContain(mode === "adopted" ? "claimed_session" : ["collision", "pane"].includes(mode) ? "unmanaged_session_collision" : "session_live");
+    if (mode === "history") expect(result.blockers).toEqual(expect.arrayContaining([
+      expect.objectContaining({ message: "A historical occupant is still live; fresh launch refuses to change this seat." }),
+    ]));
     expect(db.serialize()).toEqual(before);
     expect(tmux.killSession).not.toHaveBeenCalled();
     expect(tmux.startServer).not.toHaveBeenCalled();

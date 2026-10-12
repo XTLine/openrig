@@ -580,7 +580,7 @@ export class SeatLifecycleService {
         complete = false;
         tmuxUnknown = true;
         warnings.push("tmux state is unknown; no server was started and no occupant was changed.");
-      } else if (error.code === "claimed_session") {
+      } else if (error.code === "claimed_session" || error.code === "session_live") {
         blockers.push({ code: error.code, message: error.message, guidance: error.guidance });
       } else blockers.push({ code: error.code, message: `Fresh launch would be refused: ${error.code}.` });
     };
