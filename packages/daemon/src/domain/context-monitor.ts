@@ -290,7 +290,6 @@ export class ContextMonitor {
     const isCurrent = () => JSON.stringify(this.getEligibleSessions(session.node_id)[0]) === JSON.stringify(session);
     try {
       if (!isCurrent()) return;
-      if (session.binding_session !== null && session.binding_session !== session.session_name) return;
       const readiness = await checker.checkReady({
         id: `context-monitor:${session.session_id}`,
         nodeId: session.node_id,

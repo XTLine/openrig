@@ -9,6 +9,8 @@ import { SessionRegistry } from "../src/domain/session-registry.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { ContextMonitor } from "../src/domain/context-monitor.js";
 import { ContextUsageStore } from "../src/domain/context-usage-store.js";
+import { getNodeInventory } from "../src/domain/node-inventory.js";
+import { compactNodeProjection } from "../../cli/src/commands/ps.js";
 import { StartupOrchestrator, type StartupInput } from "../src/domain/startup-orchestrator.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 import type { NodeBinding, ProjectionResult, ReadinessResult, RuntimeAdapter } from "../src/domain/runtime-adapter.js";
@@ -140,6 +142,28 @@ describe("ContextMonitor readiness ownership", () => {
     expect(state(session.id)).toEqual(first);
     expect(check).toHaveBeenCalledTimes(ready ? 1 : 2);
   });
+
+  it.each(["claude-code", "codex"].flatMap(runtime => [true, false].map(ready => ({ runtime, ready }))))(
+    "probes the recorded $runtime session despite a lasting binding mismatch (ready=$ready)", async ({ runtime, ready }) => {
+      const { rig, node, session } = seed(runtime);
+      registry.updateBinding(node.id, { tmuxSession: "dev-other@fixture" });
+      const binding = registry.getBindingForNode(node.id);
+      const check = vi.fn(async () => ready ? { ready: true } as const : blocked);
+      const monitor = makeMonitor(runtime, check);
+
+      await monitor.pollOnce();
+      expect(state(session.id)).toMatchObject({ status: "running", startup_status: ready ? "ready" : "attention_required" });
+      const inventory = getNodeInventory(db, rig.id);
+      expect(inventory).toMatchObject([{ nodeId: node.id, startupStatus: ready ? "ready" : "attention_required" }]);
+      expect(compactNodeProjection(inventory)).toMatchObject([{ startupStatus: ready ? "ready" : "attention_required" }]);
+      expect(check).toHaveBeenCalledWith(expect.objectContaining({ nodeId: node.id, tmuxSession: session.sessionName }));
+      const first = state(session.id);
+      await monitor.pollOnce();
+      expect(state(session.id)).toEqual(first);
+      expect(check).toHaveBeenCalledTimes(ready ? 1 : 2);
+      expect(registry.getBindingForNode(node.id)).toEqual(binding);
+    },
+  );
 
   it("keeps a failed probe unknown and lets the next current probe recover", async () => {
     const { session } = seed();
