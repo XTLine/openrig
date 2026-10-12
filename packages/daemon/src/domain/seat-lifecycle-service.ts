@@ -549,8 +549,8 @@ export class SeatLifecycleService {
    * No lifecycle lock, repair, material projection, native launch or persistent write
    * is entered. Siblings are listed as unchanged; no seat is reserved by the result.
    * Known blockers set launchable=false; otherwise incomplete observations yield null.
-   * Unreadable tmux and unresolved adapter details remain incomplete, never readiness.
-   * Errors are reduced to safe codes and commands to inert, redacted templates;
+   * Unreadable tmux remains incomplete, never readiness. No launch command is built.
+   * Errors are reduced to safe codes;
    * startup text, credentials and process output are not included in the response.
    */
   async planFresh(input: { seatRef: string; fresh: boolean; stop?: boolean }) {
@@ -564,7 +564,7 @@ export class SeatLifecycleService {
     if ("code" in resolved) return refusal(resolved);
     const prepared = this.resolveFreshLaunch(resolved, input.seatRef);
     if ("code" in prepared) return refusal(prepared);
-    const { seat, rig, node, adapter, startup, canonicalSessionName } = prepared;
+    const { seat, rig, node, startup, canonicalSessionName } = prepared;
     const blockers: Array<{ code: string; message: string }> = [];
     const warnings = ["Snapshot only; execution resolves and validates again. Native readiness is not checked."];
     let complete = true;
@@ -595,43 +595,16 @@ export class SeatLifecycleService {
         if (!input.stop) blockers.push({ code: "session_live", message: "A live managed occupant requires --stop." });
       }
     }
-    let permission: { effectiveMode: string; source: string } | null = null;
-    let command: import("./runtime-adapter.js").RuntimeLaunchPreview = {
-      status: "unknown", executable: false, commandTemplate: null,
-      warnings: ["This runtime does not expose a read-only command preview."],
-    };
-    try {
-      const store = new NativePermissionStore(this.db);
-      if (adapter.runtime === "claude-code" || adapter.runtime === "codex") {
-        const selection = store.resolve(node.id, adapter.runtime);
-        permission = { effectiveMode: selection.effectiveMode, source: selection.source };
-      }
-      const launchPosture = this.rigRepo.getNodePolicyProvenance(node.id)?.launchPosture
-        ?? this.rigRepo.getRigPolicyProvenance(seat.rigId)?.launchPosture ?? "floor";
-      const binding = store.apply({
-        id: "<new-binding>", nodeId: node.id, tmuxSession: canonicalSessionName,
-        tmuxWindow: null, tmuxPane: null, cmuxWorkspace: null, cmuxSurface: null, updatedAt: "",
-        cwd: node.cwd ?? ".", model: node.model ?? undefined, effort: node.effort ?? undefined,
-        codexConfigProfile: node.codexConfigProfile ?? undefined, launchPosture,
-        nonInterruptive: this.rigRepo.getRigNonInterruptive(seat.rigId),
-      }, adapter.runtime);
-      if (adapter.previewLaunch) command = await adapter.previewLaunch(binding, { name: canonicalSessionName });
-    } catch {
-      complete = false;
-      warnings.push("Permission or runtime command details could not be resolved without launching.");
-    }
-    if (command.status !== "available") complete = false;
     const launchable = blockers.length > 0 ? false : complete ? true : null;
     const siblings = rig.nodes.filter(n => n.id !== node.id).map(n => ({
       logicalId: n.logicalId, sessionName: n.binding?.tmuxSession ?? null, effect: "unchanged" as const,
     }));
     return {
       ok: true as const, planOnly: true as const, complete, launchable, seat,
-      sessionName: canonicalSessionName, runtime: node.runtime, cwd: node.cwd ?? ".",
-      model: node.model, effort: node.effort ?? null, permission, currentOccupant,
+      sessionName: canonicalSessionName, currentOccupant,
       stopRequired, wouldStop: blockers.length > 0 ? false : tmuxUnknown ? null : owned && input.stop === true,
-      command, blockers, warnings, siblings,
-      startup: { policyHash: startup.hash, projectionCount: startup.plan.entries.length,
+      blockers, warnings, siblings,
+      startup: { projectionCount: startup.plan.entries.length,
         fileCount: startup.resolvedStartupFiles.filter(f => f.appliesOn.includes("fresh_start")).length,
         actionCount: startup.startupActions.filter(a => a.appliesOn.includes("fresh_start")).length },
     };

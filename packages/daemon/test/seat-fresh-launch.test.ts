@@ -313,13 +313,14 @@ describe("SeatLifecycleService.launchFresh", () => {
     const siblingSession = sessionRegistry.registerSession(sibling.id, "dev-qa@fresh-rig");
     sessionRegistry.updateBinding(sibling.id, { tmuxSession: siblingSession.sessionName, tmuxPane: "%qa" });
     alive.add(siblingSession.sessionName);
-    adapter.previewLaunch = vi.fn(async () => ({ status: "available", executable: false, commandTemplate: "# Preview only: <runtime>", warnings: [] }));
     for (const name of ["project", "deliverStartup", "launchHarness", "checkReady"] as const) vi.spyOn(adapter, name);
     const before = db.serialize();
     const result = await service.planFresh({ seatRef: seat.sessionName, fresh: true, stop: true });
     expect(result).toMatchObject({ ok: true, planOnly: true, complete: true, launchable: true,
       currentOccupant: live ? "present" : "absent", wouldStop: live, stopRequired: live,
       siblings: [{ logicalId: "dev.qa", sessionName: siblingSession.sessionName, effect: "unchanged" }] });
+    expect(result).not.toHaveProperty("command");
+    expect(result).not.toHaveProperty("permission");
     expect(db.serialize()).toEqual(before);
     for (const name of ["createSession", "killSession", "startServer", "sendText", "sendKeys", "setSessionOption"] as const) expect(tmux[name]).not.toHaveBeenCalled();
     for (const name of ["project", "deliverStartup", "launchHarness", "checkReady"] as const) expect(adapter[name]).not.toHaveBeenCalled();
@@ -389,7 +390,6 @@ describe("SeatLifecycleService.launchFresh", () => {
 
   it("execution resolves again when state changes after preview", async () => {
     const seat = seedSeat({ clean: true });
-    adapter.previewLaunch = async () => ({ status: "available", executable: false, commandTemplate: null, warnings: [] });
     expect(await service.planFresh({ seatRef: seat.sessionName, fresh: true })).toMatchObject({ launchable: true });
     alive.add(seat.sessionName);
     expect(await service.launchFresh({ seatRef: seat.sessionName, fresh: true, stop: true, reason: "execute after preview" }))
@@ -433,14 +433,6 @@ describe("SeatLifecycleService.launchFresh", () => {
     expect(await service.planFresh({ seatRef: seat.sessionName, fresh: true })).toMatchObject({ ok: true, planOnly: true, siblings: [] });
   });
 
-  it("passes persisted non-interruptive launch settings to the runtime preview", async () => {
-    const seat = seedSeat({ clean: true });
-    rigRepo.setRigNonInterruptive(seat.rig.id, true);
-    adapter.previewLaunch = vi.fn(async () => ({ status: "available", executable: false, commandTemplate: null, warnings: [] }));
-    await service.planFresh({ seatRef: seat.sessionName, fresh: true });
-    expect(adapter.previewLaunch).toHaveBeenCalledWith(expect.objectContaining({ nonInterruptive: true, cwd: "/project", model: "claude-current" }), { name: seat.sessionName });
-  });
-
   it("does not promise a stop when a historical tmux probe is unknown", async () => {
     const seat = seedSeat();
     const historical = sessionRegistry.registerSession(seat.node.id, "old@fresh-rig");
@@ -455,19 +447,6 @@ describe("SeatLifecycleService.launchFresh", () => {
     expect(tmux.killSession).not.toHaveBeenCalled();
   });
 
-  it.each(["pi", "omp", "terminal", "stub"])("does not invent a native permission selection for %s", async runtime => {
-    const seat = seedSeat({ clean: true });
-    db.prepare("UPDATE nodes SET runtime = ? WHERE id = ?").run(runtime, seat.node.id);
-    db.prepare("UPDATE node_startup_context SET runtime = ? WHERE node_id = ?").run(runtime, seat.node.id);
-    const previewLaunch = vi.fn(async () => ({ status: "available" as const, executable: false as const, commandTemplate: null, warnings: [] }));
-    const other = new SeatLifecycleService({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: tmux,
-      nodeLauncher: {} as NodeLauncher, startupOrchestrator: {} as StartupOrchestrator,
-      runtimeAdapters: { [runtime]: { ...adapter, runtime, previewLaunch } } });
-    const result = await other.planFresh({ seatRef: seat.sessionName, fresh: true });
-    expect(result).toMatchObject({ ok: true, permission: null, launchable: true });
-    expect(previewLaunch).toHaveBeenCalledWith(expect.objectContaining({ launchPosture: "floor" }), { name: seat.sessionName });
-    expect(tmux.createSession).not.toHaveBeenCalled();
-  });
 
   it("requires explicit fresh and a valid persisted startup context before mutation", async () => {
     const seat = seedSeat({ clean: true, withContext: false });
