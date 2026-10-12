@@ -3952,9 +3952,9 @@ export class QueueRepository {
   }
 
   private handoffAdvisory(row: QueueItemRow): QueueItem["handoffAdvisory"] {
-    // handoff() creates its local successor in the same transaction. Do not
-    // scan successor history again on every projection of those source rows.
-    if (row.state === "handed-off" || !isTerminalState(row.state)
+    // Internal handoffs record the next owner; a generic update can also write
+    // handed-off, without that field or a successor. Only skip recorded handoffs.
+    if ((row.state === "handed-off" && row.handed_off_to !== null) || !isTerminalState(row.state)
       || row.closure_reason !== "handed_off_to" || !row.closure_target) return undefined;
     const target = row.closure_target;
     try {
