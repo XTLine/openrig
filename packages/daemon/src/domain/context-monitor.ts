@@ -304,7 +304,8 @@ export class ContextMonitor {
         cwd: session.cwd ?? "",
       });
       // Hold no database lock while observing the runtime. Revalidation and
-      // the write share a short transaction, so another writer cannot interleave.
+      // the write share an immediate transaction, reserving the writer before the
+      // snapshot read so WAL contention cannot fail a later read-to-write upgrade.
       this.db.transaction(() => {
         if (!isCurrent()) return;
         if (readiness.ready) {
@@ -327,7 +328,7 @@ export class ContextMonitor {
             WHERE id = ?
           `).run(session.session_id);
         }
-      })();
+      }).immediate();
     } catch {
       // Best-effort normalization only; telemetry polling still succeeds.
     }
