@@ -45,6 +45,10 @@ export function detectCodexLimitBanner(paneContent: string): CodexLimitBanner | 
     const line = lines[i]!;
     if (!BANNER_LINE_RE.test(line)) continue;
     if (isFenced(lines, i)) continue;
+    // Once a banner is established, its following user blocks cannot supply
+    // output or alter quote boundaries. Keep initial banner recognition intact.
+    const after = withoutPromptContinuations(lines.slice(i + 1));
+    lines.splice(i + 1, after.length, ...after);
     // The reset phrase can wrap onto the following lines in a capture — but
     // only when the banner line doesn't carry it yet. A one-line banner with
     // its reset text ends here: the next line is newer output, not a
@@ -67,6 +71,22 @@ export function detectCodexLimitBanner(paneContent: string): CodexLimitBanner | 
     };
   }
   return null;
+}
+
+function withoutPromptContinuations(lines: string[]): string[] {
+  // Codex renders draft continuations in a two-column gutter. Preserve the
+  // outer prompt as their boundary; nested markers, banners and fences are
+  // user text. Conservatively keep any deeper indentation inside that block.
+  let promptIndent: number | null = null;
+  let fenced = false;
+  return lines.map((line) => {
+    const indent = line.search(/\S/);
+    if (indent < 0) return line;
+    if (promptIndent !== null && indent > promptIndent) return "";
+    if (FENCE_RE.test(line)) fenced = !fenced;
+    promptIndent = !fenced && INPUT_LINE_RE.test(line) ? indent : null;
+    return line;
+  });
 }
 
 function isFenced(lines: string[], index: number): boolean {
