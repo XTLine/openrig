@@ -18,6 +18,8 @@ import { attachAgentActivity } from "../src/domain/node-inventory.js";
 import type { AgentActivity } from "../src/domain/types.js";
 import type Database from "better-sqlite3";
 import { createFullTestDb } from "./helpers/test-app.js";
+import { psCommand } from "../../cli/src/commands/ps.js";
+import { STATE_FILE } from "../../cli/src/daemon-lifecycle.js";
 
 const BANNER = [
   " long output above",
@@ -211,6 +213,21 @@ describe("recordCodexLimitBanner", () => {
     expect(recorded).toBe(true);
   });
 
+  it.each([
+    { rawEvent: "PermissionRequest" },
+    { rawEvent: "Stop" },
+    { generation: null },
+    { eventAt: T0.toISOString() },
+    { eventAt: new Date(T0.getTime() + 1000).toISOString() },
+    { eventAt: null },
+    { eventAt: "invalid" },
+    { generation: "previous-generation" },
+  ])("does not clear newer, undated or other-occupant evidence: %j", (overrides) => {
+    const store = fakeStore(hookRow({ eventAt: new Date(T0.getTime() - 1000).toISOString(), ...overrides }));
+    expect(recordCodexLimitBanner({ store, resolveGeneration: () => "gen-1", sessionName: "guard@rig", banner: null, now: () => T0 })).toBe(false);
+    expect(store.recordHookEvent).not.toHaveBeenCalled();
+  });
+
   it("does not record the same banner again after a newer hook cleared it", () => {
     const getLatest = vi
       .fn()
@@ -240,7 +257,7 @@ describe("SeatStructuralActivityService — Codex limit banner emission", () => 
     } as never);
     const seen: Array<{ session: string; reset: string | null }> = [];
     svc.attachCodexLimitBanner((sessionName, banner) => {
-      seen.push({ session: sessionName, reset: banner.resetText });
+      seen.push({ session: sessionName, reset: banner?.resetText ?? null });
     });
     await svc.pollSeat("dev@rig", null, "codex");
     expect(seen).toEqual([{ session: "dev@rig", reset: "4:14 AM" }]);
@@ -361,7 +378,7 @@ describe("codex-limit-banner — store mapping and seat status", () => {
     { name: "stale newer permission", hookAge: 6000, paneAge: 5000, expected: "usage_limit" },
     { name: "expired limit", hookAge: 600000, paneAge: 1000, expected: "permission_prompt" },
     { name: "previous-generation limit", hookAge: 0, paneAge: 1000, expected: "permission_prompt" },
-    { name: "newer idle", hookAge: 2000, paneAge: 1000, expected: "usage_limit" },
+    { name: "newer idle", hookAge: 2000, paneAge: 1000, expected: "idle_prompt" },
   ].flatMap(scenario => [false, true].map(liveMotion => ({ ...scenario, liveMotion }))))(
     "$name with live motion $liveMotion respects cached attention chronology",
     async ({ name, hookAge, paneAge, expected, liveMotion }) => {
@@ -385,7 +402,10 @@ describe("codex-limit-banner — store mapping and seat status", () => {
         let clock = new Date(NOW.getTime() - paneAge);
         const capturePaneContent = vi.fn(async () => name === "newer idle" ? "output\n❯ " : "Do you want to proceed?");
         const structuralActivity = new SeatStructuralActivityService({ capturePaneContent }, () => clock);
-        expect((await structuralActivity.pollSeat(sessionName))?.state)
+        if (name === "newer idle") structuralActivity.attachCodexLimitBanner((sessionName, banner, at) => {
+          recordCodexLimitBanner({ store, resolveGeneration: () => "current-generation", sessionName, banner, now: () => at });
+        });
+        expect((await structuralActivity.pollSeat(sessionName, null, "codex"))?.state)
           .toBe(name === "newer idle" ? "agent_idle" : "attention");
         clock = NOW;
         capturePaneContent.mockClear();
@@ -396,9 +416,9 @@ describe("codex-limit-banner — store mapping and seat status", () => {
           now: NOW,
         });
         expect(out[0]!.agentActivity).toMatchObject({
-          state: expected === "permission_prompt" ? "needs_input" : "unknown",
-          reason: expected,
-          evidenceSource: expected === "permission_prompt" ? "pane_heuristic" : "runtime_hook",
+          state: expected === "permission_prompt" ? "needs_input" : expected === "idle_prompt" ? (liveMotion ? "running" : "idle") : "unknown",
+          reason: expected === "idle_prompt" && liveMotion ? "window_activity_motion" : expected,
+          evidenceSource: expected === "usage_limit" ? "runtime_hook" : expected === "idle_prompt" && liveMotion ? "terminal_activity" : "pane_heuristic",
         });
         if (expected === "permission_prompt") {
           expect(out[0]!.agentActivity?.sampledAt).toBe(new Date(NOW.getTime() - paneAge).toISOString());
@@ -410,6 +430,80 @@ describe("codex-limit-banner — store mapping and seat status", () => {
       }
     },
   );
+
+  it("ends a limit durably after a valid newer poll, without inventing work", async () => {
+    const db = createFullTestDb();
+    try {
+      const { sessionName } = seedCodexSeat(db);
+      let clock = NOW;
+      let generation = "current-generation";
+      const deps = { db, eventBus: new EventBus(db), now: () => clock, resolveOccupantGeneration: () => generation };
+      const store = new AgentActivityStore(deps);
+      const capturePaneContent = vi.fn(async (): Promise<string | null> => BANNER);
+      const structuralActivity = new SeatStructuralActivityService({ capturePaneContent }, () => clock);
+      structuralActivity.attachCodexLimitBanner((sessionName, banner, at) => {
+        recordCodexLimitBanner({ store, resolveGeneration: () => generation, sessionName, banner, now: () => at });
+      });
+      const read = async (seatActivity?: SeatActivityService) => (await attachAgentActivity(entries(sessionName), {
+        tmuxAdapter: { capturePaneContent } as never, structuralActivity, seatActivity,
+        activityStore: new AgentActivityStore(deps), now: clock,
+      }))[0]!.agentActivity;
+      await structuralActivity.pollSeat(sessionName, null, "codex");
+      expect(await read(await recentMotion(sessionName))).toMatchObject({ reason: "usage_limit" });
+      clock = new Date(NOW.getTime() + 1000);
+      capturePaneContent.mockRejectedValueOnce(new Error("capture failed")).mockResolvedValueOnce(null);
+      for (let i = 0; i < 2; i++) {
+        await structuralActivity.pollSeat(sessionName, null, "codex");
+        expect(await read()).toMatchObject({ reason: "usage_limit" });
+      }
+      await structuralActivity.pollSeat(sessionName, new Map([[sessionName, { text: "output\n❯ ", capturedAt: NOW }]]), "codex");
+      expect(await read()).toMatchObject({ reason: "usage_limit" });
+      capturePaneContent.mockResolvedValue("output\n❯ ");
+      await structuralActivity.pollSeat(sessionName, null, "codex");
+      expect.soft(await read()).toMatchObject({ state: "idle", reason: "idle_prompt" });
+      expect.soft(new AgentActivityStore(deps).getLatestForNode({ sessionName })).toMatchObject({
+        state: "unknown", reason: "usage_limit_cleared", eventAt: clock.toISOString(), generation: "current-generation",
+      });
+      const eventCount = db.prepare("SELECT COUNT(*) AS n FROM events WHERE type = 'agent.activity'").get();
+      clock = new Date(NOW.getTime() + 2000);
+      capturePaneContent.mockResolvedValue("new working output");
+      await structuralActivity.pollSeat(sessionName, null, "codex");
+      const motion = new SeatActivityService({ tmux: { readPaneLastActivity: async () => clock.getTime() / 1000 }, defaultWindowSeconds: 3, now: () => clock });
+      await motion.pollSeat(sessionName);
+      const recovered = await read(motion);
+      expect.soft(recovered).toMatchObject({ state: "running", reason: "window_activity_motion" });
+      const log = vi.spyOn(console, "log").mockImplementation(() => {});
+      try {
+        await psCommand({
+          lifecycleDeps: {
+            exists: (path) => path === STATE_FILE,
+            readFile: () => JSON.stringify({ pid: 1, port: 1, db: "fixture.sqlite", startedAt: NOW.toISOString() }),
+            isProcessAlive: () => true, fetch: async () => ({ ok: true }),
+          } as never,
+          clientFactory: () => ({ get: async (path: string) => ({ status: 200, data: path.includes("/nodes")
+            ? [{ canonicalSessionName: sessionName, logicalId: "dev.qa", agentActivity: recovered }]
+            : [{ rigId: "fixture", rigName: "test-rig", status: "running" }] }) }) as never,
+        }).parseAsync(["node", "rig", "--nodes", "--active", "--json", "--rig", "test-rig"]);
+        expect.soft(JSON.parse(log.mock.calls[0]![0])).toMatchObject({ totalNodes: 1, entries: [{ canonicalSessionName: sessionName, agentActivity: { state: "running" } }] });
+      } finally { log.mockRestore(); }
+      expect(db.prepare("SELECT COUNT(*) AS n FROM events WHERE type = 'agent.activity'").get()).toEqual(eventCount);
+      capturePaneContent.mockResolvedValue("Do you want to proceed?");
+      await structuralActivity.pollSeat(sessionName, null, "codex");
+      expect(await read(motion)).toMatchObject({ state: "needs_input", reason: "permission_prompt" });
+      capturePaneContent.mockResolvedValue(BANNER);
+      await structuralActivity.pollSeat(sessionName, null, "codex");
+      expect(await read(motion)).toMatchObject({ reason: "usage_limit" });
+      generation = "next-generation";
+      clock = new Date(NOW.getTime() + 3000);
+      store.recordHookEvent({ runtime: "codex", sessionName, hookEvent: "at_limit", generation });
+      await structuralActivity.pollSeat(sessionName, new Map([[sessionName, {
+        text: "old occupant output", capturedAt: new Date(NOW.getTime() + 2500),
+      }]]), "codex");
+      expect(await read(motion)).toMatchObject({ reason: "usage_limit", generation });
+    } finally {
+      db.close();
+    }
+  });
 
   it.each(["stale_runtime_hook", "generation_mismatch"].flatMap(reason =>
     [false, true].map(liveMotion => ({ reason, liveMotion })),

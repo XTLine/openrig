@@ -115,12 +115,26 @@ export function recordCodexLimitBanner(deps: {
   store: Pick<AgentActivityStore, "getLatestForNode" | "recordHookEvent">;
   resolveGeneration: (sessionName: string) => string | null;
   sessionName: string;
-  banner: CodexLimitBanner;
+  banner: CodexLimitBanner | null;
   now?: () => Date;
 }): boolean {
   const nowFn = deps.now ?? (() => new Date());
   const nowMs = nowFn().getTime();
   const latest = deps.store.getLatestForNode({ sessionName: deps.sessionName });
+  if (!deps.banner) {
+    clearRecordedBanner(deps.sessionName);
+    const generation = deps.resolveGeneration(deps.sessionName);
+    // Only a newer, same-occupant capture can end the stored episode. A
+    // neutral notification supersedes the limit without inventing idle/work;
+    // the ordinary structural and motion evidence still decides the state.
+    if (latest?.rawEvent !== "at_limit" || latest.generation !== generation ||
+        !(nowMs > Date.parse(latest.eventAt ?? ""))) return false;
+    return deps.store.recordHookEvent({
+      runtime: "codex", sessionName: deps.sessionName,
+      hookEvent: "Notification", subtype: "usage_limit_cleared",
+      occurredAt: new Date(nowMs).toISOString(), generation,
+    }).ok;
+  }
   if (latest?.rawEvent === "at_limit") {
     // Still the reported episode: refresh only once the report ages out, so
     // a night at the limit is a handful of rows, not thousands.
