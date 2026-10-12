@@ -11,7 +11,7 @@ import { codexPostureArg } from "./yolo-mode.js";
 import type {
   RuntimeAdapter, NodeBinding, ResolvedStartupFile,
   InstalledResource, ProjectionResult, StartupDeliveryResult, ReadinessResult,
-  HarnessLaunchResult, RuntimeLaunchPreview,
+  HarnessLaunchResult,
 } from "../domain/runtime-adapter.js";
 // Type-only — keeps the profile-preflight module's dynamic import lazy for
 // production (no runtime import cost from this line).
@@ -339,40 +339,6 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     return { delivered, failed, ...(warnings.length ? { warnings } : {}) };
   }
 
-  /**
-   * Describe Codex's fresh command using binding settings and the target session name.
-   * The name selects the queue-option shape but is never emitted in the template.
-   * No git, profile, network, workspace or native-capability probe/preparation runs;
-   * their unresolved options remain placeholders, so this result is always partial.
-   * The shell-comment template shares execution's builder and contains no env values.
-   */
-  async previewLaunch(binding: NodeBinding, opts: { name: string }): Promise<RuntimeLaunchPreview> {
-    const profile = binding.codexConfigProfile?.trim();
-    const posture = codexPostureArg(profile ? ` -p ${shellQuote("<profile>")}` : "", process.env, binding.launchPosture);
-    const applied = observeCodexSandbox(posture);
-    const plainFloor = applied.state === "observed" && applied.value === "workspace-write";
-    const teamWorkspace = !!(binding.teamPermissionDefault && !profile && plainFloor && this.prepareTeamWorkspace);
-    const network = !!(this.readNetworkDefault && plainFloor && applied.approvalPolicy == null);
-    const warnings = ["Git metadata directories are unresolved; no git or native client is executed."];
-    if (this.detectDaemonSupport) warnings.push("Codex --no-daemon support is unknown; launch may refuse until its native probe succeeds.");
-    if (network) warnings.push("Codex network defaults are unknown; the app-server probe is not run.");
-    if (profile) warnings.push("Codex profile loading is not validated.");
-    if (teamWorkspace) warnings.push("Team workspace directories are not prepared or verified.");
-    const queueArg = teamWorkspace ? " <team-workspace-options>"
-      : codexQueueStateRoot(opts.name, "/preview") ? ` --add-dir ${shellQuote("<queue-state-dir>")}` : "";
-    const core = buildCodexFreshCommand({
-      daemonArg: this.detectDaemonSupport ? " <daemon-support-options>" : "",
-      postureArg: posture + operationalLaunchArg(this.runtime, binding),
-      networkArg: network ? " <network-default-options>" : "", cwd: "<cwd>",
-      gitDirArg: " <git-metadata-options>", queueStateDirArg: queueArg,
-      modelArg: binding.model?.trim() ? ` -m ${shellQuote("<model>")}` : "",
-      effortArg: binding.effort?.trim() ? ` -c ${shellQuote('model_reasoning_effort="<effort>"')}` : "",
-    });
-    const environment = this.seatLaunchEnvironment ? "<seat-launch-environment> "
-      : this.codexHome || this.launchPath ? "<launch-environment> " : "";
-    return { status: "partial", executable: false, commandTemplate: "# Preview only: " + environment + core, warnings };
-  }
-
   async launchHarness(
     binding: NodeBinding,
     opts: { name: string; resumeToken?: string; forkSource?: import("../domain/runtime-adapter.js").ForkSource },
@@ -473,7 +439,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       // 0.5.2-07 A2-3: the pod-aware RESUME path threads the SPEC model too (reverted before — the
       // grounding map assumed codex parity with the claude adapter, but only fresh emitted -m).
       ? buildCodexResumeCore(opts.resumeToken, profile, false, queueStateDirArg.trim() || undefined, binding.launchPosture, model, `${postureArg}${networkArg}`, daemonOptOut, effort)
-      : buildCodexFreshCommand({ daemonArg, postureArg, networkArg, cwd: binding.cwd, gitDirArg, queueStateDirArg, modelArg, effortArg });
+      : `codex${daemonArg}${postureArg}${networkArg} -C ${shellQuote(binding.cwd)}${gitDirArg}${queueStateDirArg}${modelArg}${effortArg}`;
 
     const textResult = await this.tmux.sendShellCommand(binding.tmuxSession, this.seatLaunchEnvironment
         ? await this.seatLaunchEnvironment.command(binding.tmuxSession, cmd, { codexCwd: binding.cwd, nodeId: binding.nodeId, generation: binding.launchGeneration, runtime: this.runtime })
@@ -1574,18 +1540,4 @@ function commandLooksLikeCodex(command: string): boolean {
 function isSkippableCodexUpdatePrompt(paneContent: string): boolean {
   return hasCodexUpdateHeader(paneContent)
     && /^\s*[›>]?\s*3\. Skip until next version\s*$/m.test(paneContent);
-}
-
-/**
- * Compose Codex's fresh command from caller-resolved option fragments and cwd.
- * Only cwd is quoted here; option fragments must already be safely formatted.
- * This pure builder does no probes, filesystem changes or transport. Preview uses
- * placeholder fragments and makes the result inert before returning it to callers.
- */
-function buildCodexFreshCommand(input: {
-  daemonArg: string; postureArg: string; networkArg: string; cwd: string;
-  gitDirArg: string; queueStateDirArg: string; modelArg: string; effortArg: string;
-}): string {
-  const { daemonArg, postureArg, networkArg, cwd, gitDirArg, queueStateDirArg, modelArg, effortArg } = input;
-  return `codex${daemonArg}${postureArg}${networkArg} -C ${shellQuote(cwd)}${gitDirArg}${queueStateDirArg}${modelArg}${effortArg}`;
 }
