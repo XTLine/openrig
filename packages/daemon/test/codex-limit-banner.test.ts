@@ -354,6 +354,63 @@ describe("codex-limit-banner — store mapping and seat status", () => {
     }
   });
 
+  it.each([
+    { name: "newer permission", hookAge: 2000, paneAge: 1000, expected: "permission_prompt" },
+    { name: "equal permission", hookAge: 1000, paneAge: 1000, expected: "usage_limit" },
+    { name: "older permission", hookAge: 1000, paneAge: 2000, expected: "usage_limit" },
+    { name: "stale newer permission", hookAge: 6000, paneAge: 5000, expected: "usage_limit" },
+    { name: "expired limit", hookAge: 600000, paneAge: 1000, expected: "permission_prompt" },
+    { name: "previous-generation limit", hookAge: 0, paneAge: 1000, expected: "permission_prompt" },
+    { name: "newer idle", hookAge: 2000, paneAge: 1000, expected: "usage_limit" },
+  ].flatMap(scenario => [false, true].map(liveMotion => ({ ...scenario, liveMotion }))))(
+    "$name with live motion $liveMotion respects cached attention chronology",
+    async ({ name, hookAge, paneAge, expected, liveMotion }) => {
+      const db = createFullTestDb();
+      try {
+        const { sessionName } = seedCodexSeat(db);
+        const store = new AgentActivityStore({
+          db, eventBus: new EventBus(db), now: () => NOW,
+          resolveOccupantGeneration: () => "current-generation",
+        });
+        expect(store.recordHookEvent({
+          runtime: "codex", sessionName, hookEvent: "at_limit",
+          generation: name === "previous-generation limit" ? "previous-generation" : "current-generation",
+          occurredAt: new Date(NOW.getTime() - hookAge).toISOString(),
+        }).ok).toBe(true);
+        expect(store.getLatestForNode({ sessionName })).toMatchObject({
+          rawEvent: "at_limit",
+          reason: name === "previous-generation limit" ? "generation_mismatch"
+            : name === "expired limit" ? "stale_runtime_hook" : "usage_limit",
+        });
+        let clock = new Date(NOW.getTime() - paneAge);
+        const capturePaneContent = vi.fn(async () => name === "newer idle" ? "output\n❯ " : "Do you want to proceed?");
+        const structuralActivity = new SeatStructuralActivityService({ capturePaneContent }, () => clock);
+        expect((await structuralActivity.pollSeat(sessionName))?.state)
+          .toBe(name === "newer idle" ? "agent_idle" : "attention");
+        clock = NOW;
+        capturePaneContent.mockClear();
+        const out = await attachAgentActivity(entries(sessionName), {
+          tmuxAdapter: { capturePaneContent } as never,
+          activityStore: store, structuralActivity,
+          seatActivity: liveMotion ? await recentMotion(sessionName) : undefined,
+          now: NOW,
+        });
+        expect(out[0]!.agentActivity).toMatchObject({
+          state: expected === "permission_prompt" ? "needs_input" : "unknown",
+          reason: expected,
+          evidenceSource: expected === "permission_prompt" ? "pane_heuristic" : "runtime_hook",
+        });
+        if (expected === "permission_prompt") {
+          expect(out[0]!.agentActivity?.sampledAt).toBe(new Date(NOW.getTime() - paneAge).toISOString());
+          expect(out[0]!.agentActivity?.evidence).toBe("Do you want to proceed?");
+        }
+        expect(capturePaneContent).not.toHaveBeenCalled();
+      } finally {
+        db.close();
+      }
+    },
+  );
+
   it.each(["stale_runtime_hook", "generation_mismatch"].flatMap(reason =>
     [false, true].map(liveMotion => ({ reason, liveMotion })),
   ))("a demoted limit ($reason) yields to structural activity and motion ($liveMotion)", async ({ reason, liveMotion }) => {

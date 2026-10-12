@@ -1372,14 +1372,23 @@ export async function attachAgentActivity(
       };
     }
 
+    // Capture-free cache read; the service rejects expired observations.
+    const structural = entry.canonicalSessionName
+      ? deps.structuralActivity?.getStructuralActivity(entry.canonicalSessionName)
+      : null;
+
     // #763: a typed provider-interruption row (at_limit) is positive evidence
     // even though its state is unknown by construction (it must never count
     // as waiting-on-a-person). Deliver it instead of the cached pane reading
     // so a limited seat shows the limit, not idle — but only while current.
     // Terminal redraws are not recovery evidence and must not erase the limit.
+    // Only a strictly newer, current attention observation outranks it.
     // A demoted row (aged out or generation-mismatched) falls through to the
     // structural reading like any other stale hook.
-    if (hookActivity?.rawEvent === "at_limit" && hookActivity.stale !== true) {
+    if (hookActivity?.rawEvent === "at_limit" && hookActivity.stale !== true && !(
+      structural?.state === "attention" &&
+      Date.parse(structural.observedAt) > Date.parse(hookActivity.eventAt ?? "")
+    )) {
       return {
         ...entry,
         agentActivity: hookActivity,
@@ -1393,9 +1402,6 @@ export async function attachAgentActivity(
     // beats hook-arrival age) and makes ACTIVITY real on the DEFAULT path for hook-less / Codex /
     // just-finished-a-turn seats: the exact fleet-blindness this fix targets. Structural discrimination
     // is STRUCTURAL (spinner shapes / esc-to-interrupt / idle prompt), never a verb allowlist.
-    const structural = entry.canonicalSessionName
-      ? deps.structuralActivity?.getStructuralActivity(entry.canonicalSessionName)
-      : null;
     if (structural && structural.state !== "unknown") {
       return {
         ...entry,
