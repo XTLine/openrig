@@ -362,7 +362,7 @@ describe("SeatLifecycleService.launchFresh", () => {
     if (mode === "history") expect(result.blockers).toEqual(expect.arrayContaining([
       expect.objectContaining({
         message: 'Historical session "old@fresh-rig" is still live; fresh launch refuses to change this seat.',
-        guidance: "Stop a live seat first with: rig seat stop",
+        guidance: "rig seat stop targets the seat's latest session, not a selected historical session; it may stop the current occupant instead.",
       }),
     ]));
     expect(db.serialize()).toEqual(before);
@@ -538,7 +538,7 @@ describe("SeatLifecycleService.launchFresh", () => {
     expect(result).toMatchObject({
       ok: false, code: "session_live",
       message: `Historical session "${historical.sessionName}" is still live; fresh launch refuses to change this seat.`,
-      guidance: "Stop a live seat first with: rig seat stop",
+      guidance: "rig seat stop targets the seat's latest session, not a selected historical session; it may stop the current occupant instead.",
     });
     expect(killed).toEqual([]);
     expect(db.serialize()).toEqual(before);
