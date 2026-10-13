@@ -49,8 +49,10 @@ export function bootstrapCommand(depsOverride?: StatusDeps): Command {
       if (!client) { process.exitCode = 1; return; }
 
       // Library name resolution: if spec looks like a name (not a path), check library
-      let sourceRef = spec;
       const isPath = spec.includes("/") || /\.(ya?ml|rigbundle)$/i.test(spec);
+      // Like rig up, resolve caller-supplied paths before the daemon reads them.
+      // Catalog sources below belong to the daemon and must retain its spelling.
+      let sourceRef = isPath ? nodePath.resolve(spec) : spec;
       if (!isPath) {
         try {
           const { resolveLibrarySpec } = await import("./specs.js");

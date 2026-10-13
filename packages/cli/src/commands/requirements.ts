@@ -1,3 +1,4 @@
+import nodePath from "node:path";
 import { Command } from "commander";
 import { DaemonClient } from "../client.js";
 import { getDaemonStatus, getDaemonUrl , daemonStatusGuard} from "../daemon-lifecycle.js";
@@ -22,7 +23,7 @@ export function requirementsCommand(depsOverride?: StatusDeps): Command {
       const client = await getClient(deps);
       if (!client) { process.exitCode = 1; return; }
 
-      const res = await client.post<Record<string, unknown>>("/api/bootstrap/plan", { sourceRef: spec });
+      const res = await client.post<Record<string, unknown>>("/api/bootstrap/plan", { sourceRef: nodePath.resolve(spec) });
 
       if (res.status >= 400) {
         if (opts.json) console.log(JSON.stringify(res.data));
